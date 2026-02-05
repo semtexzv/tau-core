@@ -1,0 +1,14 @@
+# Crate patches for plugin compilation.
+# Format: <patch-name> = <source-dir-relative-to-workspace>
+#
+# Used by:
+#   - compiler.rs (include_str!, injects --config patch.crates-io.<name>.path=...)
+#   - xtask dist  (copies source dirs to dist/src/<name>/)
+#
+# The patch-name is what appears in Cargo's [patch.crates-io] table.
+# Plugins declare `foo = "0.1"` in their Cargo.toml; the host compiler
+# redirects that to the local source at build time.
+
+tau     = crates/tau
+tau-rt  = crates/tau-rt
+tokio   = crates/tau-tokio

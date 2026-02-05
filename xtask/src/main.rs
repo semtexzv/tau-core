@@ -30,6 +30,36 @@ fn main() {
 }
 
 // =============================================================================
+// patches.list parsing (shared with compiler.rs)
+// =============================================================================
+
+/// A patch entry from patches.list: crate name → source dir relative to workspace root.
+struct PatchEntry {
+    name: String,
+    rel_path: String,
+}
+
+/// Parse the workspace's patches.list file.
+fn parse_patches(root: &Path) -> Vec<PatchEntry> {
+    let content = fs::read_to_string(root.join("patches.list"))
+        .expect("patches.list not found in workspace root");
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (name, path) = line.split_once('=')?;
+            Some(PatchEntry {
+                name: name.trim().to_string(),
+                rel_path: path.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+// =============================================================================
 // dist
 // =============================================================================
 
@@ -37,6 +67,7 @@ fn dist(release: bool) {
     let root = workspace_root();
     let profile = if release { "release" } else { "debug" };
     let dist_dir = root.join("dist");
+    let patches = parse_patches(&root);
 
     println!("=== Tau Core Distribution ({}) ===", profile);
 
@@ -44,9 +75,8 @@ fn dist(release: bool) {
     if dist_dir.exists() {
         fs::remove_dir_all(&dist_dir).expect("Failed to clean dist/");
     }
-    for sub in ["bin", "lib", "src/tau", "src/tokio"] {
-        fs::create_dir_all(dist_dir.join(sub)).expect("Failed to create dist subdirs");
-    }
+    fs::create_dir_all(dist_dir.join("bin")).unwrap();
+    fs::create_dir_all(dist_dir.join("lib")).unwrap();
 
     // 1. Build
     println!("\n[1/5] Building...");
@@ -62,24 +92,33 @@ fn dist(release: bool) {
     // 2. Copy binaries
     println!("[2/5] Copying binaries...");
     cp(&target_dir.join("tau"), &dist_dir.join("bin/tau"));
-    cp(&target_dir.join("libtau.dylib"), &dist_dir.join("lib/libtau.dylib"));
+    cp(
+        &target_dir.join("libtau_rt.dylib"),
+        &dist_dir.join("lib/libtau_rt.dylib"),
+    );
 
     // Fix RPATH so binary finds libs in ../lib
-    run_silent(Command::new("install_name_tool")
-        .args(["-add_rpath", "@executable_path/../lib"])
-        .arg(dist_dir.join("bin/tau")));
+    run_silent(
+        Command::new("install_name_tool")
+            .args(["-add_rpath", "@executable_path/../lib"])
+            .arg(dist_dir.join("bin/tau")),
+    );
 
-    // Rewrite libtau.dylib reference to use @rpath
-    let tau_ref = otool_find_ref(&dist_dir.join("bin/tau"), "libtau.dylib");
-    if let Some(old_ref) = tau_ref {
-        println!("  Rewriting: {} → @rpath/libtau.dylib", old_ref);
-        run_silent(Command::new("install_name_tool")
-            .args(["-change", &old_ref, "@rpath/libtau.dylib"])
-            .arg(dist_dir.join("bin/tau")));
+    // Rewrite libtau_rt.dylib reference to use @rpath
+    let tau_rt_ref = otool_find_ref(&dist_dir.join("bin/tau"), "libtau_rt.dylib");
+    if let Some(old_ref) = tau_rt_ref {
+        println!("  Rewriting: {} → @rpath/libtau_rt.dylib", old_ref);
+        run_silent(
+            Command::new("install_name_tool")
+                .args(["-change", &old_ref, "@rpath/libtau_rt.dylib"])
+                .arg(dist_dir.join("bin/tau")),
+        );
     }
-    run_silent(Command::new("install_name_tool")
-        .args(["-id", "@rpath/libtau.dylib"])
-        .arg(dist_dir.join("lib/libtau.dylib")));
+    run_silent(
+        Command::new("install_name_tool")
+            .args(["-id", "@rpath/libtau_rt.dylib"])
+            .arg(dist_dir.join("lib/libtau_rt.dylib")),
+    );
 
     // 3. Copy Rust standard library
     println!("[3/5] Copying Rust std...");
@@ -107,29 +146,37 @@ fn dist(release: bool) {
         eprintln!("  Warning: libstd dylib not found in {:?}", std_lib_dir);
     }
 
-    // 4. Copy source crates
+    // 4. Copy source crates (driven by patches.list)
     println!("[4/5] Copying source crates...");
-    let crates_dir = root.join("crates");
+    for patch in &patches {
+        let src_dir = root.join(&patch.rel_path);
+        let dst_dir = dist_dir.join("src").join(&patch.name);
+        fs::create_dir_all(&dst_dir).unwrap();
 
-    // tau
-    copy_dir(&crates_dir.join("tau/src"), &dist_dir.join("src/tau/src"));
-    cp(&crates_dir.join("tau/Cargo.toml"), &dist_dir.join("src/tau/Cargo.toml"));
-    cp(&crates_dir.join("tau/build.rs"), &dist_dir.join("src/tau/build.rs"));
+        // Copy src/
+        if src_dir.join("src").exists() {
+            copy_dir(&src_dir.join("src"), &dst_dir.join("src"));
+        }
+        // Copy Cargo.toml
+        if src_dir.join("Cargo.toml").exists() {
+            cp(&src_dir.join("Cargo.toml"), &dst_dir.join("Cargo.toml"));
+        }
+        // Copy build.rs if present
+        if src_dir.join("build.rs").exists() {
+            cp(&src_dir.join("build.rs"), &dst_dir.join("build.rs"));
+        }
 
-    // tokio shim
-    copy_dir(&crates_dir.join("tau-tokio/src"), &dist_dir.join("src/tokio/src"));
-    cp(&crates_dir.join("tau-tokio/Cargo.toml"), &dist_dir.join("src/tokio/Cargo.toml"));
-    cp(&crates_dir.join("tau-tokio/build.rs"), &dist_dir.join("src/tokio/build.rs"));
+        println!("  {} → src/{}/", patch.rel_path, patch.name);
+    }
 
-    // Strip `tau = { path = ... }` from dist tokio Cargo.toml (provided via --extern)
-    let tokio_toml_path = dist_dir.join("src/tokio/Cargo.toml");
-    let content = fs::read_to_string(&tokio_toml_path).unwrap();
-    let filtered: String = content
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("tau = "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&tokio_toml_path, filtered).unwrap();
+    // Post-process: strip workspace-relative `path = ...` deps from dist Cargo.toml
+    // files. In dist, deps are resolved via --extern or patches from the host.
+    for patch in &patches {
+        let toml_path = dist_dir.join("src").join(&patch.name).join("Cargo.toml");
+        if toml_path.exists() {
+            strip_path_deps(&toml_path);
+        }
+    }
 
     println!("  Source crates copied to src/");
 
@@ -158,6 +205,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     println!("\n=== Distribution Ready ===");
     println!("Location: {}", dist_dir.display());
     print_dir_sizes(&dist_dir);
+}
+
+/// Strip lines like `tau = { path = ... }` or `tau-rt = { path = ... }` from a
+/// Cargo.toml. In the dist bundle, these deps come via --extern / patches.
+fn strip_path_deps(toml_path: &Path) {
+    let content = fs::read_to_string(toml_path).unwrap();
+    let filtered: String = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            // Keep the line unless it's a `foo = { path = "..." }` dependency
+            !(trimmed.contains("path =") && trimmed.contains('{'))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(toml_path, filtered).unwrap();
 }
 
 // =============================================================================
@@ -354,11 +417,28 @@ Self-contained async plugin system with tokio-compatible API.
 
 ## Components
 - `bin/tau` — Host executable (exports runtime symbols)
-- `lib/libtau.dylib` — Shared interface library
+- `lib/libtau_rt.dylib` — Shared runtime library (ONE copy, linked by all plugins)
 - `lib/libstd-*.dylib` — Bundled Rust standard library
-- `src/` — Source crates for plugin compilation
-  - `src/tau/` — Tau runtime interface crate
+- `src/` — Source crates for plugin compilation (driven by `patches.list`)
+  - `src/tau/` — Plugin SDK (rlib, compiled into each plugin)
+  - `src/tau-rt/` — Runtime interface (dylib, shared)
   - `src/tokio/` — Tokio compatibility shim
+
+## Architecture
+
+```
+Plugin A (cdylib)          Plugin B (cdylib)
+  ┌─────────────┐           ┌─────────────┐
+  │ tau (rlib)   │           │ tau (rlib)   │
+  │ own statics  │           │ own statics  │
+  └──────┬──────┘           └──────┬──────┘
+         │  links to dylib         │
+         ▼                         ▼
+  ┌────────────────────────────────────┐
+  │    libtau_rt.dylib (shared)        │
+  │  spawn, sleep, resource, event, io │
+  └────────────────────────────────────┘
+```
 
 ## Usage
 ```bash

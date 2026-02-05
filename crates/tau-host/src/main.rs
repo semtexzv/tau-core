@@ -9,7 +9,7 @@
 mod compiler;
 mod runtime;
 
-use compiler::{Compiler, InterfacePaths};
+use compiler::{Compiler, ResolvedPatches};
 use serde::{Deserialize, Serialize};
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ struct PluginHooks {
     process: unsafe extern "C" fn(*const u8, usize) -> u64,
 }
 
-type PluginInitFn = unsafe extern "C" fn(*mut PluginHooks, u64) -> i32;
+type PluginInitFn = unsafe extern "C" fn(*mut PluginHooks, u64, *const tau::PluginGuard) -> i32;
 type PluginDestroyFn = unsafe extern "C" fn();
 
 pub struct AsyncPlugin {
@@ -73,10 +73,19 @@ impl AsyncPlugin {
         let plugin_id = runtime::allocate_plugin_id();
 
         let mut hooks = MaybeUninit::<PluginHooks>::uninit();
+
+        // Create a PluginGuard for this plugin's dlopen handle
+        let guard = runtime::plugin_guard::guard_from_dlopen(handle, plugin_id);
+        // Heap-allocate so we can pass a stable pointer across FFI
+        let guard_box = Box::new(guard);
+        let guard_ptr = &*guard_box as *const tau::PluginGuard;
+
         // Set current plugin before init so resource/event calls are tagged
         runtime::set_current_plugin(plugin_id);
-        let result = init(hooks.as_mut_ptr(), plugin_id);
+        let result = init(hooks.as_mut_ptr(), plugin_id, guard_ptr);
         runtime::clear_current_plugin();
+        // Guard was cloned by the plugin's init; drop our copy
+        drop(guard_box);
         if result != 0 {
             libc::dlclose(handle);
             return Err("Plugin init failed".into());
@@ -146,13 +155,13 @@ impl Drop for AsyncPlugin {
 
 pub struct Host {
     compiler: Option<Compiler>,
-    interface_paths: InterfacePaths,
+    patches: ResolvedPatches,
     dist_lib_path: PathBuf,
 }
 
 impl Host {
     pub fn new(
-        interface_paths: InterfacePaths,
+        patches: ResolvedPatches,
         enable_compiler: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Initialize runtime
@@ -171,9 +180,10 @@ impl Host {
         let exe_path = std::env::current_exe()?;
         let exe_dir = exe_path.parent().ok_or("No parent dir")?;
 
-        let dist_lib_path = if exe_dir.join("libtau.dylib").exists() {
+        // Look for libtau_rt.dylib (the shared runtime dylib)
+        let dist_lib_path = if exe_dir.join("libtau_rt.dylib").exists() {
             exe_dir.to_path_buf()
-        } else if exe_dir.parent().unwrap().join("lib").join("libtau.dylib").exists() {
+        } else if exe_dir.parent().unwrap().join("lib").join("libtau_rt.dylib").exists() {
             exe_dir.parent().unwrap().join("lib")
         } else {
             exe_dir.to_path_buf()
@@ -181,14 +191,14 @@ impl Host {
 
         Ok(Self {
             compiler,
-            interface_paths,
+            patches,
             dist_lib_path,
         })
     }
 
     pub fn compile_plugin(&self, source: &Path) -> Result<PathBuf, String> {
         let compiler = self.compiler.as_ref().ok_or("Compiler not available")?;
-        compiler.compile_plugin(source, &self.interface_paths, &self.dist_lib_path)
+        compiler.compile_plugin(source, &self.patches, &self.dist_lib_path)
     }
 
     pub fn load_plugin(&self, path: &Path) -> Result<AsyncPlugin, Box<dyn std::error::Error>> {
@@ -273,26 +283,27 @@ fn main() {
 
     // Resolve interface crate paths (tau + tokio shim).
     // In dist layout: dist/src/{tau,tokio}
-    // In dev layout: tau-core/crates/{tau,tau-tokio}
-    let interface_paths = {
-        let dist_tau = exe_dir.parent().unwrap().join("src").join("tau");
-        let dist_tokio = exe_dir.parent().unwrap().join("src").join("tokio");
-
+    // Resolve patch paths.
+    // In dist layout: dist/src/{tau,tau-rt,tokio}/
+    // In dev layout:  workspace_root/crates/{tau,tau-rt,tau-tokio}/
+    //
+    // patches.list is relative to workspace root. We detect which layout
+    // we're in by checking if the dist src dir exists.
+    let patches = {
+        let dist_src_root = exe_dir.parent().unwrap().join("src");
         // dev: exe is in target/debug/tau, workspace root is ../../
         let workspace_root = exe_dir.parent().unwrap().parent().unwrap();
-        let dev_tau = workspace_root.join("crates").join("tau");
-        let dev_tokio = workspace_root.join("crates").join("tau-tokio");
 
-        if dist_tau.exists() && dist_tokio.exists() {
-            InterfacePaths {
-                tau: dist_tau,
-                tokio_shim: dist_tokio,
-            }
+        if dist_src_root.join("tau").exists() {
+            // Dist layout — patches.list paths are remapped to dist/src/<name>
+            let entries = compiler::parse_patches()
+                .into_iter()
+                .map(|e| (e.name.clone(), dist_src_root.join(&e.name)))
+                .collect();
+            ResolvedPatches { entries }
         } else {
-            InterfacePaths {
-                tau: dev_tau,
-                tokio_shim: dev_tokio,
-            }
+            // Dev layout — resolve relative to workspace root
+            ResolvedPatches::resolve(workspace_root)
         }
     };
 
@@ -308,8 +319,10 @@ fn main() {
             println!("Version:     {}", Compiler::HOST_VERSION);
             println!("Target:      {}", Compiler::HOST_TARGET);
             println!("Panic:       {}", Compiler::HOST_PANIC);
-            println!("Interface tau:   {:?}", interface_paths.tau);
-            println!("Interface tokio: {:?}", interface_paths.tokio_shim);
+            println!("Patch crates:");
+            for (name, path) in &patches.entries {
+                println!("  {} → {:?}", name, path);
+            }
 
             match Compiler::resolve() {
                 Ok(c) => {
@@ -368,7 +381,7 @@ fn main() {
             //   assert_resource <name> — check that a resource exists
             //   assert_no_resource <name> — check that a resource does NOT exist
             //   print <msg>            — print a message
-            let host = Host::new(interface_paths, true).expect("Failed to init host");
+            let host = Host::new(patches, true).expect("Failed to init host");
             run_test_mode(&host);
         }
 
@@ -377,7 +390,7 @@ fn main() {
             // Modes: load, ipc, spawn, event, all
             let mode = args.get(2).map(|s| s.as_str()).unwrap_or("all");
             let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10_000);
-            let host = Host::new(interface_paths, true).expect("Failed to init host");
+            let host = Host::new(patches, true).expect("Failed to init host");
             run_bench(&host, mode, iters);
         }
 
@@ -388,7 +401,7 @@ fn main() {
                 std::process::exit(1);
             }
             let path = PathBuf::from(&args[2]);
-            let host = Host::new(interface_paths, path.is_dir()).expect("Failed to init host");
+            let host = Host::new(patches, path.is_dir()).expect("Failed to init host");
             
             let dylib_path = if path.is_dir() {
                 println!("[Host] Compiling {:?}...", path);
@@ -432,7 +445,7 @@ fn main() {
             }
 
             let need_compiler = all_paths.iter().any(|p| p.is_dir());
-            let host = Host::new(interface_paths, need_compiler).expect("Failed to init host");
+            let host = Host::new(patches, need_compiler).expect("Failed to init host");
 
             let mut loaded_plugins = Vec::new();
 

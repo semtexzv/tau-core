@@ -2,20 +2,23 @@
 //!
 //! Generates the `#[no_mangle] extern "C"` boilerplate so plugin authors
 //! just write normal Rust functions.
+//!
+//! Also stores the [`PluginGuard`](crate::PluginGuard) in the per-plugin
+//! [`PLUGIN_GUARD`](crate::guard::PLUGIN_GUARD) static during init.
 
 /// Define a tau plugin.
 ///
 /// Generates `plugin_init`, `plugin_destroy`, and the process hook.
-/// Stores the plugin_id in a local static so `tau::plugin_id()` works.
+/// Stores the plugin_id and [`PluginGuard`](crate::PluginGuard) in plugin-local
+/// statics so [`tau::guard::plugin_guard()`](crate::guard::plugin_guard) and
+/// `plugin_id()` work.
 ///
 /// # Example
 ///
-/// ```rust
-/// use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
-///
+/// ```rust,ignore
 /// tau::define_plugin! {
 ///     fn init() {
-///         tau::resource::put("counter", Arc::new(AtomicU64::new(0)));
+///         tau::rt::resource::put("counter", std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
 ///     }
 ///
 ///     fn destroy() {
@@ -61,12 +64,29 @@ macro_rules! define_plugin {
             $request_body
         }
 
+        /// Raw init entry point called by the host.
+        ///
+        /// `guard_ptr` is a `*const PluginGuard` heap-allocated by the host.
+        /// We clone it and store in our per-plugin static, then the host
+        /// drops the original.
         #[no_mangle]
-        pub unsafe extern "C" fn plugin_init(hooks: *mut __TauPluginHooks, pid: u64) -> i32 {
+        pub unsafe extern "C" fn plugin_init(
+            hooks: *mut __TauPluginHooks,
+            pid: u64,
+            guard_ptr: *const $crate::PluginGuard,
+        ) -> i32 {
             // Store our plugin ID
             __TAU_PLUGIN_ID.store(pid, std::sync::atomic::Ordering::Relaxed);
+
+            // Store the plugin guard in our per-plugin static
+            if !guard_ptr.is_null() {
+                let guard = (*guard_ptr).clone();
+                let _ = $crate::guard::PLUGIN_GUARD.set(guard);
+            }
+
             // Wire up hooks
             (*hooks).process = __tau_process_trampoline;
+
             // User init
             (|| $init_body)();
             0

@@ -28,18 +28,41 @@
 //!   into a specific plugin's `.text`. Wrap them in [`PluginBox`], [`PluginArc`],
 //!   or [`PluginFn`] to keep the creating plugin alive.
 //!
-//! # Current plugin guard
+//! # Per-plugin guard storage
 //!
-//! The host sets a thread-local "current guard" before calling into any plugin
-//! via [`set_current_guard`]. Plugin code can retrieve it with
-//! [`PluginGuard::current()`] or use convenience constructors like
-//! [`PluginBox::current`] that automatically capture the right guard.
+//! Because `tau` is an **rlib** (statically compiled into each plugin), each
+//! plugin gets its own copy of the [`PLUGIN_GUARD`] static. The host sets it
+//! during `plugin_init` via the [`define_plugin!`](crate::define_plugin) macro.
 //!
-//! This ensures that closures, trait objects, and function pointers created
-//! during a plugin call are tagged with the correct plugin's guard — the one
-//! whose `.text` section contains the code.
+//! [`PluginGuard::current()`] reads from this per-plugin static, so it always
+//! returns the correct guard for the plugin whose code is executing.
+//!
+//! Convenience constructors like [`PluginBox::current`] use this automatically.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+// =============================================================================
+// Per-plugin guard static
+// =============================================================================
+
+/// Per-plugin guard storage.
+///
+/// Since `tau` is an rlib, each plugin's cdylib gets its own copy of this static.
+/// The [`define_plugin!`](crate::define_plugin) macro sets it during `plugin_init`.
+pub static PLUGIN_GUARD: OnceLock<PluginGuard> = OnceLock::new();
+
+/// Get this plugin's guard.
+///
+/// # Panics
+///
+/// Panics if called before `plugin_init` has run (i.e., before `define_plugin!`
+/// has stored the guard).
+pub fn plugin_guard() -> PluginGuard {
+    PLUGIN_GUARD
+        .get()
+        .expect("plugin_guard() called before plugin_init — is define_plugin! missing?")
+        .clone()
+}
 
 // =============================================================================
 // PluginBinary — the ref-counted dlopen handle
@@ -115,26 +138,21 @@ impl PluginGuard {
 
     /// Get the current plugin's guard.
     ///
-    /// This reads the thread-local guard set by the host before calling into
-    /// the plugin. Use this when creating `PluginBox`/`PluginArc`/`PluginFn`
-    /// values and you don't want to pass the guard explicitly.
+    /// Reads from the per-plugin [`PLUGIN_GUARD`] static. Since `tau` is an
+    /// rlib, each plugin has its own copy of that static, so this always
+    /// returns the correct guard for the calling plugin.
     ///
     /// # Panics
     ///
-    /// Panics if no guard is set (i.e., called outside of a plugin context).
+    /// Panics if called before `define_plugin!` has run (plugin not yet initialized).
     pub fn current() -> Self {
-        CURRENT_GUARD.with(|g| {
-            g.borrow().clone().expect(
-                "PluginGuard::current() called outside of plugin context \
-                 (no guard set — host must call set_current_guard before entering plugin code)"
-            )
-        })
+        plugin_guard()
     }
 
-    /// Try to get the current plugin's guard, returning `None` if not in a
-    /// plugin context (e.g., running in the host's own code).
+    /// Try to get the current plugin's guard, returning `None` if the plugin
+    /// has not been initialized yet.
     pub fn try_current() -> Option<Self> {
-        CURRENT_GUARD.with(|g| g.borrow().clone())
+        PLUGIN_GUARD.get().cloned()
     }
 
     /// Create a null guard (for host-owned values that don't belong to a plugin).

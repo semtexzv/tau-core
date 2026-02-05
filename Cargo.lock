@@ -187,6 +187,9 @@ dependencies = [
 [[package]]
 name = "tau"
 version = "0.1.0"
+dependencies = [
+ "tau-rt",
+]
 
 [[package]]
 name = "tau-host"
@@ -197,7 +200,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tau",
+ "tau-rt",
 ]
+
+[[package]]
+name = "tau-rt"
+version = "0.1.0"
 
 [[package]]
 name = "tokio"

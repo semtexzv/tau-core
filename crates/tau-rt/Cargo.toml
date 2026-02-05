@@ -1,0 +1,12 @@
+[package]
+name = "tau-rt"
+version = "0.1.0"
+edition = "2021"
+description = "Tau shared runtime — dynamic library linked by all plugins"
+build = "build.rs"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+# No external dependencies — tau-rt is self-contained

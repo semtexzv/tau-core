@@ -12,10 +12,10 @@ pub use tau::guard::*;
 /// # Safety
 ///
 /// `dl_handle` must be a valid, non-null handle returned by `libc::dlopen`.
-pub unsafe fn guard_from_dlopen(dl_handle: *mut libc::c_void, plugin_id: u64) -> PluginGuard {
+pub unsafe fn guard_from_dlopen(dl_handle: *mut libc::c_void, plugin_id: u64) -> tau::PluginGuard {
     unsafe fn dlclose_fn(handle: *mut ()) {
         libc::dlclose(handle as *mut libc::c_void);
     }
 
-    PluginGuard::new(dl_handle as *mut (), dlclose_fn, plugin_id)
+    tau::PluginGuard::new(dl_handle as *mut (), dlclose_fn, plugin_id)
 }

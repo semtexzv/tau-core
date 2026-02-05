@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use tau::types::{FfiPoll, FfiWaker, RawDropFn, RawPollFn};
+use tau_rt::types::{FfiPoll, FfiWaker, RawDropFn, RawPollFn};
 
 // =============================================================================
 // Plugin tracking - which plugin is currently active (for task ownership)

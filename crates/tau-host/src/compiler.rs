@@ -13,16 +13,69 @@
 //! the host and all plugins, which allows concrete data (String, Vec, structs, etc.)
 //! to be safely sent across plugin boundaries. See the [`tau`] crate-level docs
 //! for the full rules on what can and cannot cross the plugin boundary.
+//!
+//! # Patch list
+//!
+//! The set of crates patched into plugin builds is defined in `patches.list`
+//! at the workspace root. Both this module (via `include_str!`) and the xtask
+//! dist command read the same file, keeping them in sync.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Paths to the interface crates that plugins compile against.
-pub struct InterfacePaths {
-    /// Path to the `tau` interface crate source (for IDE / fallback)
-    pub tau: PathBuf,
-    /// Path to the `tokio` shim crate source
-    pub tokio_shim: PathBuf,
+/// Raw content of `patches.list` — baked in at compile time.
+const PATCHES_LIST: &str = include_str!("../../../patches.list");
+
+/// A single patch entry: crate name → source directory (relative to workspace root).
+#[derive(Debug, Clone)]
+pub struct PatchEntry {
+    /// Crate name as it appears in `[patch.crates-io]` (e.g. "tau", "tau-rt", "tokio")
+    pub name: String,
+    /// Source directory relative to workspace root (e.g. "crates/tau")
+    pub rel_path: String,
+}
+
+/// Parse `patches.list` into a list of entries.
+pub fn parse_patches() -> Vec<PatchEntry> {
+    PATCHES_LIST
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (name, path) = line.split_once('=')?;
+            Some(PatchEntry {
+                name: name.trim().to_string(),
+                rel_path: path.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Resolved patch paths (absolute) for a given root directory.
+pub struct ResolvedPatches {
+    pub entries: Vec<(String, PathBuf)>,
+}
+
+impl ResolvedPatches {
+    /// Resolve all patch entries relative to `root`.
+    pub fn resolve(root: &Path) -> Self {
+        let entries = parse_patches()
+            .into_iter()
+            .map(|e| (e.name, root.join(&e.rel_path)))
+            .collect();
+        Self { entries }
+    }
+
+    /// Look up a resolved path by patch name.
+    #[allow(dead_code)]
+    pub fn get(&self, name: &str) -> Option<&Path> {
+        self.entries
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, p)| p.as_path())
+    }
 }
 
 /// Compiler configuration detected from environment
@@ -47,12 +100,12 @@ impl Compiler {
     /// Resolve a compatible Rust compiler at runtime.
     pub fn resolve() -> Result<Self, String> {
         let rustc = Self::find_compatible_compiler()?;
-        
+
         let sysroot = Self::query_sysroot(&rustc)?;
         let target = Self::HOST_TARGET.to_string();
         let std_search_dir = sysroot.join("lib/rustlib").join(&target).join("lib");
         let std_dylib = Self::find_std_dylib(&std_search_dir)?;
-        
+
         let cargo = Self::find_cargo(&rustc);
 
         Ok(Self {
@@ -66,11 +119,13 @@ impl Compiler {
     }
 
     /// Compile a plugin from a Cargo crate directory.
-    /// Returns the path to the built dylib in the build cache.
+    ///
+    /// `patches` — resolved source paths for `[patch.crates-io]`.
+    /// `dist_lib_path` — directory containing `libtau_rt.dylib` and `libstd-*.dylib`.
     pub fn compile_plugin(
         &self,
         source_dir: &Path,
-        interface_paths: &InterfacePaths,
+        patches: &ResolvedPatches,
         dist_lib_path: &Path,
     ) -> Result<PathBuf, String> {
         let source_dir = source_dir
@@ -86,9 +141,9 @@ impl Compiler {
         let is_release = !cfg!(debug_assertions);
         let profile = if is_release { "release" } else { "debug" };
 
-        // Detect prebuilt crates (dylibs we can use via --extern)
+        // Detect prebuilt dylibs we can pass via --extern
         let prebuilt = self.detect_prebuilt_crates(dist_lib_path);
-        
+
         // Build rustflags
         let rustflags = self.build_rustflags(dist_lib_path, &prebuilt);
 
@@ -111,13 +166,18 @@ impl Compiler {
             cmd.arg("build");
         }
 
-        // Inject crate patches (tokio shim, tau if not prebuilt)
-        self.inject_patches(&mut cmd, interface_paths, &prebuilt);
+        // Inject crate patches from patches.list
+        self.inject_patches(&mut cmd, patches, &prebuilt);
 
-        println!("[Compiler] Building plugin in {:?} ({})", source_dir, profile);
+        println!(
+            "[Compiler] Building plugin in {:?} ({})",
+            source_dir, profile
+        );
 
         // Execute build
-        let output = cmd.output().map_err(|e| format!("Failed to run cargo: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run cargo: {}", e))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -125,7 +185,11 @@ impl Compiler {
         }
 
         // Find the artifact and copy to plugins/ subdirectory
-        self.find_artifact(&source_dir, &target_dir.join(profile), &cache_dir.join("plugins"))
+        self.find_artifact(
+            &source_dir,
+            &target_dir.join(profile),
+            &cache_dir.join("plugins"),
+        )
     }
 
     // =========================================================================
@@ -161,7 +225,9 @@ impl Compiler {
             .map_err(|e| format!("Failed to resolve rustc: {}", e))?;
 
         if output.status.success() {
-            Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+            Ok(PathBuf::from(
+                String::from_utf8_lossy(&output.stdout).trim(),
+            ))
         } else {
             Err(format!("Could not find rustc for {}", Self::HOST_VERSION))
         }
@@ -196,7 +262,10 @@ impl Compiler {
     }
 
     fn check_compiler_version(cmd: &str, expected: &str) -> Result<PathBuf, String> {
-        let output = Command::new(cmd).arg("-V").output().map_err(|e| e.to_string())?;
+        let output = Command::new(cmd)
+            .arg("-V")
+            .output()
+            .map_err(|e| e.to_string())?;
         if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected {
             Ok(PathBuf::from(cmd))
         } else {
@@ -209,12 +278,18 @@ impl Compiler {
             .args(["--print", "sysroot"])
             .output()
             .map_err(|e| format!("Failed to query sysroot: {}", e))?;
-        Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+        Ok(PathBuf::from(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        ))
     }
 
     fn find_cargo(rustc: &Path) -> PathBuf {
         if rustc.is_absolute() {
-            if let Some(cargo) = rustc.parent().map(|p| p.join("cargo")).filter(|p| p.exists()) {
+            if let Some(cargo) = rustc
+                .parent()
+                .map(|p| p.join("cargo"))
+                .filter(|p| p.exists())
+            {
                 return cargo;
             }
         }
@@ -236,11 +311,16 @@ impl Compiler {
         Err("std dylib not found".into())
     }
 
-    fn get_build_cache_dir(&self, source_dir: &Path, dist_lib_path: &Path) -> Result<PathBuf, String> {
+    fn get_build_cache_dir(
+        &self,
+        source_dir: &Path,
+        dist_lib_path: &Path,
+    ) -> Result<PathBuf, String> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        let home =
+            std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
         let cache_root = home.join(".tau").join("buildcache");
 
         let mut hasher = DefaultHasher::new();
@@ -249,11 +329,11 @@ impl Compiler {
         // Include compiler version so toolchain changes invalidate the cache
         self.version_string.hash(&mut hasher);
 
-        // Include libtau.dylib content hash so recompiling tau invalidates plugins
-        // (symbol hashes change when tau is rebuilt)
-        let tau_dylib = dist_lib_path.join("libtau.dylib");
-        if tau_dylib.exists() {
-            if let Ok(bytes) = std::fs::read(&tau_dylib) {
+        // Include libtau_rt.dylib content hash so recompiling tau-rt invalidates plugins
+        // (symbol hashes change when tau-rt is rebuilt)
+        let tau_rt_dylib = dist_lib_path.join("libtau_rt.dylib");
+        if tau_rt_dylib.exists() {
+            if let Ok(bytes) = std::fs::read(&tau_rt_dylib) {
                 bytes.hash(&mut hasher);
             }
         }
@@ -269,10 +349,10 @@ impl Compiler {
     fn detect_prebuilt_crates(&self, dist_lib_path: &Path) -> PrebuiltCrates {
         let mut crates = PrebuiltCrates::default();
 
-        // Check for libtau.dylib - use it via --extern for all crate compilations
-        let tau_dylib = dist_lib_path.join("libtau.dylib");
-        if tau_dylib.exists() {
-            crates.tau = Some(tau_dylib);
+        // Check for libtau_rt.dylib — the shared runtime dylib
+        let tau_rt_dylib = dist_lib_path.join("libtau_rt.dylib");
+        if tau_rt_dylib.exists() {
+            crates.tau_rt = Some(tau_rt_dylib);
         }
 
         crates
@@ -288,24 +368,32 @@ impl Compiler {
 
         // Dynamic linking flags
         flags.extend([
-            "-C".into(), "prefer-dynamic".into(),
-            "-C".into(), "link-args=-Wl,-undefined,dynamic_lookup".into(),
-            "-L".into(), dist_lib_path.display().to_string(),
-            "-C".into(), format!("panic={}", Self::HOST_PANIC),
+            "-C".into(),
+            "prefer-dynamic".into(),
+            "-C".into(),
+            "link-args=-Wl,-undefined,dynamic_lookup".into(),
+            "-L".into(),
+            dist_lib_path.display().to_string(),
+            "-C".into(),
+            format!("panic={}", Self::HOST_PANIC),
         ]);
 
         // Target features (if any)
         if !Self::HOST_TARGET_FEATURES.is_empty() {
-            flags.extend(["-C".into(), format!("target-feature={}", Self::HOST_TARGET_FEATURES)]);
+            flags.extend([
+                "-C".into(),
+                format!("target-feature={}", Self::HOST_TARGET_FEATURES),
+            ]);
         }
 
-        // Add --extern for prebuilt crates
-        if let Some(tau_path) = &prebuilt.tau {
+        // Add --extern for prebuilt dylibs
+        if let Some(tau_rt_path) = &prebuilt.tau_rt {
             flags.extend([
-                "-L".into(), tau_path.parent().unwrap().display().to_string(),
-                format!("--extern=tau={}", tau_path.display()),
+                "-L".into(),
+                tau_rt_path.parent().unwrap().display().to_string(),
+                format!("--extern=tau_rt={}", tau_rt_path.display()),
             ]);
-            println!("[Compiler] Using prebuilt tau: {:?}", tau_path);
+            println!("[Compiler] Using prebuilt tau-rt: {:?}", tau_rt_path);
         }
 
         flags.join("\x1f")
@@ -326,23 +414,35 @@ impl Compiler {
         }
 
         cmd.env("LIBRARY_PATH", append_path("LIBRARY_PATH", dist_lib_path))
-            .env("PKG_CONFIG_PATH", append_path("PKG_CONFIG_PATH", &dist_lib_path.join("pkgconfig")))
-            .env("CPATH", append_path("CPATH", &dist_root.join("include")));
+            .env(
+                "PKG_CONFIG_PATH",
+                append_path("PKG_CONFIG_PATH", &dist_lib_path.join("pkgconfig")),
+            )
+            .env(
+                "CPATH",
+                append_path("CPATH", &dist_root.join("include")),
+            );
     }
 
-    fn inject_patches(&self, cmd: &mut Command, paths: &InterfacePaths, prebuilt: &PrebuiltCrates) {
-        // Always patch tokio to our shim
-        cmd.arg("--config")
-            .arg(format!("patch.crates-io.tokio.path=\"{}\"", paths.tokio_shim.display()));
-
-        // Only patch tau if not using prebuilt dylib
-        if prebuilt.tau.is_none() {
+    /// Inject `--config patch.crates-io.<name>.path="<abs>"` for every entry
+    /// in `patches.list`. If a prebuilt dylib exists for a crate (currently
+    /// only `tau-rt`), that crate is skipped — cargo will pick it up via the
+    /// `--extern` flag in rustflags instead.
+    fn inject_patches(
+        &self,
+        cmd: &mut Command,
+        patches: &ResolvedPatches,
+        prebuilt: &PrebuiltCrates,
+    ) {
+        for (name, path) in &patches.entries {
+            // Skip tau-rt if we have a prebuilt dylib
+            if name == "tau-rt" && prebuilt.tau_rt.is_some() {
+                continue;
+            }
             cmd.arg("--config")
-                .arg(format!("patch.crates-io.tau.path=\"{}\"", paths.tau.display()));
-            println!("[Compiler] Patching tau → {:?}", paths.tau);
+                .arg(format!("patch.crates-io.{}.path=\"{}\"", name, path.display()));
+            println!("[Compiler] Patching {} → {:?}", name, path);
         }
-
-        println!("[Compiler] Patching tokio → {:?}", paths.tokio_shim);
     }
 
     fn find_artifact(
@@ -367,17 +467,20 @@ impl Compiler {
         let built_path = build_dir.join(&dylib_name);
 
         if !built_path.exists() {
-            return Err(format!("Artifact {} not found in {:?}", dylib_name, build_dir));
+            return Err(format!(
+                "Artifact {} not found in {:?}",
+                dylib_name, build_dir
+            ));
         }
 
         // Copy to plugins/ subdirectory for clean organization
         std::fs::create_dir_all(plugins_dir)
             .map_err(|e| format!("Failed to create plugins dir: {}", e))?;
-        
+
         let final_path = plugins_dir.join(&dylib_name);
         std::fs::copy(&built_path, &final_path)
             .map_err(|e| format!("Failed to copy artifact: {}", e))?;
-        
+
         println!("[Compiler] Plugin ready: {:?}", final_path);
         Ok(final_path)
     }
@@ -386,7 +489,8 @@ impl Compiler {
 /// Tracks which crates have prebuilt dylibs available
 #[derive(Default)]
 struct PrebuiltCrates {
-    tau: Option<PathBuf>,
+    /// Pre-built `libtau_rt.dylib` — the shared runtime
+    tau_rt: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -399,5 +503,20 @@ mod tests {
         println!("rustc: {:?}", compiler.rustc);
         println!("sysroot: {:?}", compiler.sysroot);
         println!("std dylib: {:?}", compiler.std_dylib);
+    }
+
+    #[test]
+    fn test_parse_patches() {
+        let patches = parse_patches();
+        assert!(patches.len() >= 3, "Expected at least 3 patches, got {}", patches.len());
+
+        let names: Vec<&str> = patches.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"tau"), "Missing tau patch");
+        assert!(names.contains(&"tau-rt"), "Missing tau-rt patch");
+        assert!(names.contains(&"tokio"), "Missing tokio patch");
+
+        for e in &patches {
+            println!("  {} → {}", e.name, e.rel_path);
+        }
     }
 }

@@ -2,11 +2,10 @@
 name = "tau"
 version = "0.1.0"
 edition = "2021"
-description = "Interface crate for Tau — plugins depend on this"
-build = "build.rs"
+description = "Tau plugin SDK — statically compiled into each plugin"
 
 [lib]
-crate-type = ["dylib"]
+crate-type = ["rlib"]
 
 [dependencies]
-# No external dependencies - tau is self-contained
+tau-rt = { path = "../tau-rt" }

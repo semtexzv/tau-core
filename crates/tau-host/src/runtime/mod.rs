@@ -12,7 +12,7 @@ pub mod plugin_guard;
 
 use executor::{poll_snapshot, RUNTIME};
 use reactor::{init_reactor, with_reactor};
-use tau::types::{FfiPoll, FfiWaker, RawDropFn, RawPollFn};
+use tau_rt::types::{FfiPoll, FfiWaker, RawDropFn, RawPollFn};
 use std::os::fd::RawFd;
 use std::time::Duration;
 

@@ -39,4 +39,5 @@ fn main() {
     println!("cargo:rustc-link-arg=-rdynamic");
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../patches.list");
 }
