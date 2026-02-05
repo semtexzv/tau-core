@@ -1,0 +1,471 @@
+# PRD: Core Infrastructure Primitives — Task Abort & Async Streams
+
+## Introduction
+
+Tau-core is a shared async runtime with dynamic plugin infrastructure. Plugins are separately-compiled `.cdylib` crates that share a single-threaded async executor with the host via dynamic linking, with a tokio compatibility shim that redirects standard `tokio::*` APIs to the tau runtime.
+
+Two foundational primitives are missing from the runtime:
+
+1. **Task abort** — `JoinHandle::abort()` is currently a no-op. Dropping or aborting a task should actually cancel it: drop the future, clean up timers, and notify waiters. This is how Rust async cancellation works — by dropping futures.
+
+2. **Async streams** — there is no `Stream` trait or stream primitive. The runtime supports `Future` (poll once → result) but not `Stream` (poll repeatedly → sequence of items). Streams are the building block for LLM token streaming, event pipelines, transform chains, and reactive data flow. They need to be fast (no unnecessary allocations on the hot path), work across the FFI boundary, and compose (map, filter, async transforms).
+
+Both primitives must integrate with the existing tokio shim so that crates like `reqwest`, `kube`, `tokio-stream`, and `futures` work transparently when compiled against the shim.
+
+## Goals
+
+- Make `JoinHandle::abort()` actually cancel the associated task (drop future, wake waiters with `JoinError`)
+- Make `AbortHandle::abort()` work the same way (decoupled from JoinHandle lifetime)
+- Ensure cancelled tasks' futures are dropped during the same drive cycle (not deferred)
+- Implement a `Stream` trait in the `tau` crate compatible with `futures_core::Stream`
+- Implement FFI-safe stream handles so plugins can create, push to, and consume streams across the plugin boundary
+- Implement core stream combinators: `map`, `filter`, `filter_map`, `take_while`, `merge`, and async `then`/`async_map`
+- Provide a `tokio-stream`-compatible shim (same Cargo `[patch]` mechanism as the tokio shim) so crates depending on `tokio-stream` compile against our implementation
+- Maintain all existing tokio shim compatibility — `reqwest`, `kube`, `tokio-util` must continue to compile and work
+- All changes pass `cargo build` for the workspace and `cargo xtask test`
+
+## User Stories
+
+### Phase 1: Task Abort
+
+---
+
+### US-001: Add `tau_task_abort` FFI export to the host executor [ ]
+
+**Description:** As a plugin developer, I want to abort a spawned task so that its future is dropped and resources are freed.
+
+**Acceptance Criteria:**
+- [ ] Add `aborted: bool` flag to the `Task` struct in `crates/tau-host/src/runtime/executor.rs`
+- [ ] Add `pub fn abort_task(&mut self, task_id: u64) -> bool` method on `Runtime` that sets the `aborted` flag and returns whether the task existed
+- [ ] Add `#[no_mangle] pub extern "C" fn tau_task_abort(task_id: u64) -> u8` in `crates/tau-host/src/runtime/mod.rs` that calls `rt.borrow_mut().abort_task(task_id)`, returns 1 if found, 0 if not
+- [ ] Aborted tasks are removed from `ready_queue` immediately
+- [ ] Aborted tasks' futures are dropped (the existing `Task::drop` calls `(drop_fn)(future_ptr)`) during the next `cleanup_completed()` or immediately
+- [ ] Associated timers for aborted tasks are cleaned up
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests (`cargo xtask test`) still pass
+
+---
+
+### US-002: Wire abort through `tau` crate and `JoinHandle` [ ]
+
+**Description:** As a plugin developer, I want `JoinHandle::abort()` to actually cancel the task so I get Rust-standard cancellation semantics.
+
+**Acceptance Criteria:**
+- [ ] Add `extern "C" { fn tau_task_abort(task_id: u64) -> u8; }` declaration in `crates/tau/src/runtime.rs`
+- [ ] `JoinHandle::abort(&self)` calls `tau_task_abort(self.task_id)`
+- [ ] When an aborted task's `WrapperFuture` is dropped, it marks the `TaskCell` as complete with an "aborted" state (new `Stage::Aborted` variant)
+- [ ] `JoinHandle` polling a task in `Stage::Aborted` returns `Poll::Ready` with a value that the tokio shim can convert to `Err(JoinError)` with `is_cancelled() == true`
+- [ ] `JoinHandle::is_finished()` returns `true` for aborted tasks
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-003: Wire abort through tokio shim `JoinHandle` and `AbortHandle` [ ]
+
+**Description:** As a user of tokio APIs, I want `tokio::JoinHandle::abort()` and `AbortHandle::abort()` to cancel tasks so that crates using tokio's cancellation patterns work correctly.
+
+**Acceptance Criteria:**
+- [ ] `crates/tau-tokio/src/lib.rs` `JoinHandle::abort()` delegates to `self.inner.abort()` (already does, now it works)
+- [ ] `AbortHandle` in `crates/tau-tokio/src/task/mod.rs` stores the `task_id` (currently it's a phantom marker)
+- [ ] `AbortHandle::abort()` calls `tau_task_abort(task_id)` via a new FFI function or through the `tau` crate
+- [ ] `AbortHandle::is_finished()` calls through to check task state
+- [ ] `JoinHandle` future impl returns `Err(JoinError)` when the task was aborted, with `JoinError::is_cancelled() == true`
+- [ ] `JoinSet::abort_all()` actually aborts all tasks (it calls `handle.abort()` which now works)
+- [ ] `JoinSet::shutdown()` aborts and then drains all handles
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-004: Abort integration test [ ]
+
+**Description:** As a developer, I want a test that proves task abort works end-to-end across the FFI boundary.
+
+**Acceptance Criteria:**
+- [ ] Create `plugins/abort-test-plugin/` with a plugin that:
+  - Spawns a long-running task (e.g., loops with `tau::sleep(1s).await`)
+  - Stores the `JoinHandle` in a resource
+  - On request "abort": calls `handle.abort()` on the stored handle
+  - On request "check": reports whether the handle is finished
+- [ ] Add a test script in `tests/` that: loads the plugin, sends "spawn", sends "abort", sends "check", verifies the task is finished
+- [ ] Test passes via `cargo xtask test` or manual invocation
+- [ ] The aborted task's future destructor actually runs (verify with a print in a Drop impl)
+- [ ] `cargo build` succeeds for the workspace
+
+---
+
+### US-REVIEW-PHASE1: Review Task Abort (US-001 through US-004) [ ]
+
+**Description:** Review US-001 through US-004 as a cohesive system.
+
+**Acceptance Criteria:**
+- [ ] Identify phase scope: US-001 to US-004
+- [ ] Run: `git log --oneline --all | grep -E "US-00[1-4]"`
+- [ ] Review all phase code files together
+- [ ] Evaluate quality:
+  - Good taste: Simple and elegant across all tasks?
+  - No special cases: Edge cases handled through design?
+  - Data structures: Consistent and appropriate?
+  - Complexity: Can anything be simplified?
+  - Duplication: Any repeated logic BETWEEN tasks?
+  - Integration: Do components work together cleanly?
+- [ ] Cross-task analysis:
+  - Verify abort during active polling doesn't cause double-free (future dropped by abort AND by poll completion)
+  - Verify abort from `spawn_blocking` thread works (wake queue → reactor notify)
+  - Verify `plugin_task_count` and `drop_plugin_tasks` still work correctly with aborted tasks
+  - Verify re-entrancy: aborting a task from within another task's poll doesn't panic the RefCell
+  - Check that `JoinSet::join_next()` correctly handles a mix of completed and aborted tasks
+- [ ] If issues found:
+  - Insert fix tasks after the failing task (US-004a, US-004b, etc.)
+  - Append review findings to progress.txt
+  - Do NOT mark this review task [x]
+- [ ] If no issues:
+  - Append "## Phase 1 review PASSED" to progress.txt
+  - Mark this review task [x]
+  - Commit: "docs: phase 1 review complete"
+
+---
+
+### Phase 2: Stream Trait & Core Types
+
+---
+
+### US-005: Re-export `futures_core::Stream` in the `tau` crate [ ]
+
+**Description:** As a plugin developer, I want a `Stream` trait available through the `tau` crate so I can produce and consume asynchronous sequences of values, using the standard `futures_core::Stream` trait that the ecosystem already depends on.
+
+**Acceptance Criteria:**
+- [ ] Add `futures-core = "0.3"` to `crates/tau/Cargo.toml` dependencies
+- [ ] Create `crates/tau/src/stream.rs`
+- [ ] Re-export the trait: `pub use futures_core::Stream;`
+- [ ] Add `pub mod stream;` to `crates/tau/src/lib.rs`
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-006: `StreamHandle` — FFI-safe stream with push/poll/close [ ]
+
+**Description:** As a plugin developer, I want to create streams that work across the FFI boundary so plugins can produce data the host (or other plugins) consume.
+
+**Acceptance Criteria:**
+- [ ] Add FFI declarations to `crates/tau/src/stream.rs`:
+  - `tau_stream_create(capacity: u32) -> u64` — creates a bounded stream, returns handle
+  - `tau_stream_push(handle: u64, data_ptr: *const u8, data_len: usize) -> u8` — push item (returns 0=ok, 1=full, 2=closed)
+  - `tau_stream_poll_next(handle: u64, waker: FfiWaker, out_ptr: *mut *const u8, out_len: *mut usize) -> u8` — poll next (returns 0=pending, 1=ready, 2=done)
+  - `tau_stream_close(handle: u64)` — signal no more items (sender side)
+  - `tau_stream_drop(handle: u64)` — release handle (receiver side, cancels the stream)
+- [ ] Add host-side implementations in a new `crates/tau-host/src/runtime/streams.rs`:
+  - Internal `StreamState` struct with `VecDeque<Vec<u8>>`, capacity, sender/receiver wakers, closed flag
+  - Global `HashMap<u64, StreamState>` behind `OnceLock<Mutex<...>>` (same pattern as events/resources)
+  - Each FFI function accesses the map, manipulates state, wakes as needed
+- [ ] Wire exports in `crates/tau-host/src/runtime/mod.rs`
+- [ ] Plugin-side safe wrappers in `crates/tau/src/stream.rs`:
+  - `StreamSender` — wraps handle, `push(&self, data: &[u8])`, `async send(&self, data: &[u8])` (waits if full), `close(self)`
+  - `StreamReceiver` — wraps handle, implements `Stream<Item = Vec<u8>>` via `poll_next`, `Drop` calls `tau_stream_drop`
+- [ ] `pub fn channel(capacity: u32) -> (StreamSender, StreamReceiver)` constructor
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-007: Typed stream wrappers with serde [ ]
+
+**Description:** As a plugin developer, I want typed streams so I can send/receive structured data without manual serialization.
+
+**Acceptance Criteria:**
+- [ ] Add `TypedStreamSender<T: Serialize>` wrapping `StreamSender` — `send(&self, value: &T)` serializes to bytes and pushes
+- [ ] Add `TypedStreamReceiver<T: DeserializeOwned>` wrapping `StreamReceiver` — implements `Stream<Item = T>` by deserializing from bytes
+- [ ] Add `pub fn typed_channel<T>(capacity: u32) -> (TypedStreamSender<T>, TypedStreamReceiver<T>)` constructor
+- [ ] Guard with `#[cfg(feature = "json")]` (same as existing `tau::event` JSON support)
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-008: Stream integration test — basic push/poll across FFI [ ]
+
+**Description:** As a developer, I want a test proving streams work end-to-end across the plugin boundary.
+
+**Acceptance Criteria:**
+- [ ] Create `plugins/stream-test-plugin/` that:
+  - On "produce N": creates a stream, pushes N items (bytes `0..N`), closes it, stores the receiver handle in a resource
+  - On "consume": polls the stored stream receiver, collects all items, prints them
+  - On "async-produce": spawns a task that pushes items with `sleep` between each, stores receiver
+- [ ] Add a test in `tests/` that loads the plugin and exercises produce→consume and async-produce→consume
+- [ ] Verify all items are received in order
+- [ ] Verify the stream signals completion (poll returns `None` after close)
+- [ ] Verify dropping the receiver doesn't crash even if sender still exists
+- [ ] `cargo build` succeeds for the workspace
+
+---
+
+### US-REVIEW-PHASE2: Review Stream Core (US-005 through US-008) [ ]
+
+**Description:** Review US-005 through US-008 as a cohesive system.
+
+**Acceptance Criteria:**
+- [ ] Identify phase scope: US-005 to US-008
+- [ ] Run: `git log --oneline --all | grep -E "US-00[5-8]"`
+- [ ] Review all phase code files together
+- [ ] Evaluate quality:
+  - Good taste: Simple and elegant across all tasks?
+  - No special cases: Edge cases handled through design?
+  - Data structures: Consistent and appropriate?
+  - Complexity: Can anything be simplified?
+  - Duplication: Any repeated logic BETWEEN tasks?
+  - Integration: Do components work together cleanly?
+- [ ] Cross-task analysis:
+  - Verify `StreamState` hot path doesn't do unnecessary allocations (reuse buffers?)
+  - Verify waker handling: push wakes receiver, poll stores waker correctly
+  - Verify cleanup: plugin unload drops all streams owned by that plugin (add `plugin_id` tracking like events/resources)
+  - Verify backpressure: bounded stream with full buffer returns `Full` from push, sender can async-wait
+  - Confirm `tau::stream::Stream` is a re-export of `futures_core::Stream` (not a separate trait)
+- [ ] If issues found:
+  - Insert fix tasks after the failing task (US-008a, US-008b, etc.)
+  - Append review findings to progress.txt
+  - Do NOT mark this review task [x]
+- [ ] If no issues:
+  - Append "## Phase 2 review PASSED" to progress.txt
+  - Mark this review task [x]
+  - Commit: "docs: phase 2 review complete"
+
+---
+
+### Phase 3: Stream Combinators
+
+---
+
+### US-009: Synchronous combinators — `map`, `filter`, `filter_map`, `take_while` [ ]
+
+**Description:** As a plugin developer, I want to transform and filter streams so I can build data pipelines without manual poll loops.
+
+**Acceptance Criteria:**
+- [ ] Create `crates/tau/src/stream/combinators.rs` (or keep in `stream.rs` if small enough)
+- [ ] `StreamExt` trait with default method implementations (extension trait on `futures_core::Stream`):
+  - `fn map<F, B>(self, f: F) -> Map<Self, F>` where `F: FnMut(Self::Item) -> B`
+  - `fn filter<F>(self, f: F) -> Filter<Self, F>` where `F: FnMut(&Self::Item) -> bool`
+  - `fn filter_map<F, B>(self, f: F) -> FilterMap<Self, F>` where `F: FnMut(Self::Item) -> Option<B>`
+  - `fn take_while<F>(self, f: F) -> TakeWhile<Self, F>` where `F: FnMut(&Self::Item) -> bool`
+- [ ] Each combinator is a struct implementing `Stream`, with correct `Pin` projections
+- [ ] All combinators are `Send` when the underlying stream and closure are `Send`
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-010: Async combinator — `then` (async map) [ ]
+
+**Description:** As a plugin developer, I want an async transform on streams so I can do async work (HTTP calls, DB queries, LLM calls) per stream item.
+
+**Acceptance Criteria:**
+- [ ] Add `fn then<F, Fut>(self, f: F) -> Then<Self, F, Fut>` to `StreamExt` where `F: FnMut(Self::Item) -> Fut`, `Fut: Future`
+- [ ] `Then` struct holds the source stream and an `Option<Fut>` for the in-flight future
+- [ ] Polling: if a future is in flight, poll it; if ready yield the result and poll the source for the next item; if source yields, create a new future via `f(item)` and poll it
+- [ ] Only one item is in-flight at a time (sequential async processing, not concurrent)
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-011: Utility combinators — `next`, `collect`, `for_each`, `fold` [ ]
+
+**Description:** As a plugin developer, I want convenience methods for consuming streams so I can await the next item or collect all items.
+
+**Acceptance Criteria:**
+- [ ] Add to `StreamExt`:
+  - `async fn next(&mut self) -> Option<Self::Item>` where `Self: Unpin` — await the next item
+  - `async fn collect<C: Default + Extend<Self::Item>>(self) -> C` where `Self: Sized` — collect all items into a container
+  - `async fn for_each<F>(self, f: F)` where `F: FnMut(Self::Item)`, `Self: Sized` — consume all items
+  - `async fn fold<B, F>(self, init: B, f: F) -> B` where `F: FnMut(B, Self::Item) -> B`, `Self: Sized`
+- [ ] Each is implemented as a future that polls the stream internally
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-012: `merge` — combine two streams into one [ ]
+
+**Description:** As a plugin developer, I want to merge multiple streams so I can process items from different sources in arrival order.
+
+**Acceptance Criteria:**
+- [ ] Add `fn merge<S2>(self, other: S2) -> Merge<Self, S2>` to `StreamExt` where `S2: Stream<Item = Self::Item>`
+- [ ] `Merge` polls both inner streams fairly (alternate which is polled first to avoid starvation)
+- [ ] Yields items from whichever stream is ready
+- [ ] Completes only when both streams are exhausted
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-013: Stream combinator tests [ ]
+
+**Description:** As a developer, I want tests for all combinators to verify correctness.
+
+**Acceptance Criteria:**
+- [ ] Create `plugins/stream-combinator-test-plugin/` (or extend `stream-test-plugin`) that tests:
+  - `map`: transform items, verify output sequence
+  - `filter`: drop items, verify only matching items pass through
+  - `filter_map`: combined filter+transform
+  - `take_while`: early termination
+  - `then`: async transform with sleep, verify ordering preserved
+  - `next`: consume one item
+  - `collect`: gather into `Vec`
+  - `merge`: two producers, verify all items received
+- [ ] Test is runnable via `cargo xtask test` or manual invocation
+- [ ] All sub-tests pass
+- [ ] `cargo build` succeeds for the workspace
+
+---
+
+### US-REVIEW-PHASE3: Review Stream Combinators (US-009 through US-013) [ ]
+
+**Description:** Review US-009 through US-013 as a cohesive system.
+
+**Acceptance Criteria:**
+- [ ] Identify phase scope: US-009 to US-013
+- [ ] Run: `git log --oneline --all | grep -E "US-0(09|1[0-3])"`
+- [ ] Review all phase code files together
+- [ ] Evaluate quality:
+  - Good taste: Simple and elegant across all tasks?
+  - No special cases: Edge cases handled through design?
+  - Data structures: Consistent and appropriate?
+  - Complexity: Can anything be simplified?
+  - Duplication: Any repeated logic BETWEEN tasks?
+  - Integration: Do components work together cleanly?
+- [ ] Cross-task analysis:
+  - Verify `Pin` projection safety in all combinator structs (no unsound `get_unchecked_mut` usage)
+  - Verify `then` correctly handles the case where the inner future is dropped mid-execution (abort scenario)
+  - Verify `merge` fairness — neither side starves the other
+  - Verify all combinators propagate `None` (stream termination) correctly
+  - Check that `StreamExt` doesn't conflict with `futures::StreamExt` if both are in scope (method names should match)
+- [ ] If issues found:
+  - Insert fix tasks after the failing task (US-013a, US-013b, etc.)
+  - Append review findings to progress.txt
+  - Do NOT mark this review task [x]
+- [ ] If no issues:
+  - Append "## Phase 3 review PASSED" to progress.txt
+  - Mark this review task [x]
+  - Commit: "docs: phase 3 review complete"
+
+---
+
+### Phase 4: Tokio-Stream Shim
+
+---
+
+### US-014: Verify real `tokio-stream` compiles against our tokio shim [ ]
+
+**Description:** As a plugin developer, I want the real `tokio-stream` crate to compile against our tokio shim so that crates depending on `tokio-stream` work transparently — no separate shim crate needed.
+
+**Acceptance Criteria:**
+- [ ] Create a test plugin that depends on `tokio-stream = "0.1"` (the real crate) and uses `ReceiverStream`, `StreamExt`
+- [ ] Compile the test plugin using the existing `--config 'patch.crates-io.tokio.path=...'` mechanism (our tokio shim)
+- [ ] If compilation fails due to missing APIs in `tau-tokio`: add the missing APIs to the tokio shim (e.g., `broadcast` channel if a default feature needs it, or additional methods on existing types)
+- [ ] If `tokio-stream` pulls in feature-gated tokio modules we don't support: configure the test plugin's `tokio-stream` dependency with only the features that work (e.g., `default-features = false, features = ["sync", "time"]`)
+- [ ] The test plugin can: create an `mpsc` channel, wrap receiver in `ReceiverStream`, use `.next()`, `.map()`, `.filter()` from `tokio_stream::StreamExt`
+- [ ] Document which `tokio-stream` features work and which don't (if any) in a comment in the test plugin
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-015: Verify `futures-core` resolves correctly in plugin builds [ ]
+
+**Description:** As a developer, I want to verify that `futures-core` (used by `tau` and by downstream crates like `hyper`, `tower`, `kube-runtime`) resolves to a single copy during plugin compilation, so there are no duplicate `Stream` trait conflicts.
+
+**Acceptance Criteria:**
+- [ ] Verify that when a plugin depends on both `tau` (via `--extern`) and a crate that pulls in `futures-core` (e.g., `reqwest`, `kube`), Cargo resolves to one `futures-core` version
+- [ ] If there's a version conflict (tau pins `futures-core 0.3.x`, downstream wants `0.3.y`): relax the version bound in `tau/Cargo.toml` to `"0.3"`
+- [ ] `http-plugin` (reqwest) still compiles and loads
+- [ ] `kube-plugin` still compiles and loads
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-016: End-to-end compatibility test with ecosystem crates [ ]
+
+**Description:** As a developer, I want to verify the stream shims don't break existing plugin compilation.
+
+**Acceptance Criteria:**
+- [ ] `cargo xtask test` passes (all existing plugins compile and tests pass)
+- [ ] `kube-plugin` compiles with `kube = { features = ["runtime"] }` which pulls in `kube-runtime` (uses streams internally)
+- [ ] `http-plugin` (reqwest) still compiles and runs
+- [ ] `tokio-plugin` still compiles and runs
+- [ ] If `kube-runtime` now uses our stream trait: verify a `watcher()` or `watch()` call compiles (even if it fails at runtime due to no cluster)
+- [ ] `cargo build` succeeds for the workspace
+
+---
+
+### US-REVIEW-PHASE4: Review Tokio-Stream Shim (US-014 through US-016) [ ]
+
+**Description:** Review US-014 through US-016 as a cohesive system.
+
+**Acceptance Criteria:**
+- [ ] Identify phase scope: US-014 to US-016
+- [ ] Run: `git log --oneline --all | grep -E "US-01[4-6]"`
+- [ ] Review all phase code files together
+- [ ] Evaluate quality:
+  - Good taste: Simple and elegant across all tasks?
+  - No special cases: Edge cases handled through design?
+  - Data structures: Consistent and appropriate?
+  - Complexity: Can anything be simplified?
+  - Duplication: Any repeated logic BETWEEN tasks?
+  - Integration: Do components work together cleanly?
+- [ ] Cross-task analysis:
+  - Verify the `tokio-stream` shim version (0.1.99) wins over real `tokio-stream` in Cargo resolution
+  - Verify `ReceiverStream` correctly bridges `mpsc::Receiver` → `Stream`
+  - Verify patch injection in `compiler.rs` includes both `tokio` and `tokio-stream` patches
+  - Verify dist layout includes `tokio-stream` shim source
+  - Verify `futures-core` resolves to one version across tau + plugin deps (no duplicate trait definitions)
+- [ ] If issues found:
+  - Insert fix tasks after the failing task (US-016a, US-016b, etc.)
+  - Append review findings to progress.txt
+  - Do NOT mark this review task [x]
+- [ ] If no issues:
+  - Append "## Phase 4 review PASSED" to progress.txt
+  - Mark this review task [x]
+  - Commit: "docs: phase 4 review complete"
+
+---
+
+## Non-Goals
+
+- **Conversation tree / session model** — out of scope, will be a separate `tau-agent` / `taugent` crate later
+- **Agent loop orchestration** — out of scope, built on top of these primitives later
+- **Tool schema registry** — out of scope, depends on a redesigned plugin interface
+- **Plugin interface redesign** — out of scope; the `define_plugin!` / `request(&[u8]) -> u64` hook is unchanged
+- **Lifecycle hook system** — out of scope, will be layered on streams later
+- **Multi-threaded runtime** — the runtime remains single-threaded; `spawn_blocking` uses OS threads
+- **Hot reload** — plugin unload/reload is not addressed
+- **Backpressure across FFI for existing event bus** — `tau::event` remains as-is (fire-and-forget pub/sub)
+
+## Technical Considerations
+
+### Existing Architecture Constraints
+
+- **RefCell borrow discipline:** The executor uses `thread_local! { RefCell<Runtime> }`. Any new host-side state (stream storage) must follow the same rule: never hold the borrow while calling plugin code. Stream state should use its own `OnceLock<Mutex<...>>` like events and resources do, or be integrated into the `Runtime` struct with the same snapshot-then-poll pattern.
+
+- **Plugin ownership tracking:** Streams must be tagged with `plugin_id` (like tasks, events, and resources). On plugin unload, all streams owned by that plugin must be dropped before `dlclose()`. Add cleanup to the existing `AsyncPlugin::drop()` sequence.
+
+- **FFI waker pattern:** Stream polling uses the same `FfiWaker` mechanism as task polling. The host provides a waker that pushes the task to the wake queue; the plugin calls `poll_next` with this waker.
+
+- **Tokio shim patching mechanism:** New shim crates (`tokio-stream`, optionally `futures-core`) use the same `--config 'patch.crates-io.<name>.path=...'` injection in `compiler.rs`. The dist layout needs matching `dist/src/<name>/` directories.
+
+- **Symbol hash matching:** New shim crates must participate in the same symbol hash matching scheme. In dev mode, they're workspace members with `path` dependencies. In dist mode, they use `--extern tau=...` to match the prebuilt `libtau.dylib`.
+
+### Performance Considerations
+
+- The `Stream` trait and combinators live in the `tau` crate (plugin side) — they're monomorphized per-plugin with zero FFI overhead for pure in-plugin streams.
+- The `StreamHandle` FFI mechanism is for cross-boundary streams only. In-plugin streams (e.g., `iter.map(...).filter(...)`) never touch FFI.
+- The host-side `StreamState` storage uses `Mutex` because `spawn_blocking` threads may push items. For the common single-threaded case, the mutex is uncontended.
+- Combinator structs should be `#[repr(transparent)]` or minimal-size where possible to avoid bloating future state.
+
+### Compatibility Notes
+
+- We re-export `futures_core::Stream` directly — no custom trait. This means `tau::stream::Stream` IS `futures_core::Stream`, zero compatibility concerns.
+- `futures-core` is a pure trait-definition crate with no runtime dependency. It's safe to include as a normal dependency of `tau`. Plugins that depend on crates using `futures-core` (e.g., `hyper`, `tower`, `kube-runtime`) will resolve to the same `futures-core` version.
+- `tokio-stream 0.1.x` re-exports `futures_core::Stream`. Our `tokio-stream` shim does the same.
+- Our `StreamExt` is an extension trait on `futures_core::Stream`. If plugins also import `futures::StreamExt`, the methods will overlap. This is the same situation as real tokio-stream vs futures — Rust handles it via explicit trait imports.

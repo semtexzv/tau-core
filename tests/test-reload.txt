@@ -1,0 +1,102 @@
+# =====================================================
+# Test 1: Single plugin lifecycle
+# =====================================================
+print Test 1: Single plugin load/run/unload/reload
+
+load events plugins/events-plugin
+send events hello-single
+assert_resource counter
+
+# Unload — resource should be cleaned up
+unload events
+assert_no_resource counter
+
+# Reload — should work fresh
+load events2 plugins/events-plugin
+send events2 hello-after-reload
+assert_resource counter
+unload events2
+assert_no_resource counter
+
+# =====================================================
+# Test 2: Two plugins, cross-communication
+# =====================================================
+print Test 2: Two plugins communicating
+
+load producer plugins/producer-plugin
+load consumer plugins/consumer-plugin
+
+# Producer creates shared-counter, consumer creates consumer-received
+assert_resource shared-counter
+assert_resource consumer-received
+
+# Send requests — producer emits ping, consumer responds with pong
+send producer request-1
+send producer request-2
+send producer request-3
+
+# Both resources should still exist
+assert_resource shared-counter
+assert_resource consumer-received
+
+# =====================================================
+# Test 3: Reload consumer while producer stays
+# =====================================================
+print Test 3: Reload consumer, producer stays loaded
+
+unload consumer
+# Consumer's resource should be gone, producer's should remain
+assert_no_resource consumer-received
+assert_resource shared-counter
+
+# Reload consumer
+load consumer2 plugins/consumer-plugin
+assert_resource consumer-received
+
+# Send more — producer->consumer communication should work again
+send producer after-consumer-reload-1
+send producer after-consumer-reload-2
+
+# =====================================================
+# Test 4: Reload producer while consumer stays
+# =====================================================
+print Test 4: Reload producer, consumer stays loaded
+
+unload producer
+# Producer's resource gone, consumer's stays
+assert_no_resource shared-counter
+assert_resource consumer-received
+
+# Reload producer
+load producer2 plugins/producer-plugin
+assert_resource shared-counter
+
+# Send — should work with new producer and old consumer
+send producer2 after-producer-reload-1
+send producer2 after-producer-reload-2
+
+# =====================================================
+# Test 5: Unload both, reload both
+# =====================================================
+print Test 5: Unload both, reload both
+
+unload producer2
+unload consumer2
+assert_no_resource shared-counter
+assert_no_resource consumer-received
+
+load p3 plugins/producer-plugin
+load c3 plugins/consumer-plugin
+assert_resource shared-counter
+assert_resource consumer-received
+
+send p3 fresh-start-1
+send p3 fresh-start-2
+
+# Final cleanup
+unload p3
+unload c3
+assert_no_resource shared-counter
+assert_no_resource consumer-received
+
+print All scenarios complete

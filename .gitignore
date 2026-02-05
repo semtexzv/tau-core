@@ -1,7 +1,32 @@
+# Build artifacts
 target/
 dist/
 dist_backup/
+
+# macOS
 .DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Rust compiled artifacts (stray)
 *.dylib
 *.rlib
 *.rmeta
+*.so
+*.d
+*.o
+
+# Cargo lock for libraries (keep for binaries)
+# Cargo.lock is committed — this is a workspace with binaries
+
+# Environment
+.env
+.env.local
+
+# Serde shim build artifacts
+serde-shim/target/

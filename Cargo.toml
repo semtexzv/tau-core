@@ -1,3 +1,7 @@
 [workspace]
-members = ["host", "tau", "example-plugin", "taukio"]
+members = ["crates/*", "xtask"]
 resolver = "2"
+default-members = ["crates/tau-host"]
+
+[profile.release]
+debug = true

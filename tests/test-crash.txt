@@ -1,0 +1,18 @@
+# Crash test: Arc<dyn Trait> vtable after dlclose
+# 
+# 1. Writer stores Arc<dyn Processor>
+# 2. Reader grabs a clone, holds it in a static
+# 3. Writer is unloaded (vtable now dangling)
+# 4. Reader calls process() on the held clone → CRASH
+
+load writer plugins/crash-writer-plugin
+load reader plugins/crash-reader-plugin
+
+# Reader grabs and holds a clone of the Arc<dyn Processor>
+send reader grab
+
+# Writer is unloaded — its code is unmapped
+unload writer
+
+# Reader calls process() on the held clone — SHOULD CRASH
+send reader call

@@ -1,0 +1,36 @@
+[package]
+name = "tokio"
+version = "1.99.0"
+edition = "2021"
+description = "Tokio compatibility shim backed by Tau runtime"
+build = "build.rs"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+tau = { path = "../tau" }
+socket2 = { version = "0.5", features = ["all"] }
+tokio-macros = "2.6"
+pin-project-lite = "0.2"
+libc = "0.2"
+
+[features]
+default = []
+full = ["rt", "rt-multi-thread", "macros", "time", "sync", "io-util", "net", "fs"]
+rt = []
+rt-multi-thread = []
+macros = []
+time = []
+sync = []
+io-util = []
+io-std = []
+net = []
+fs = []
+signal = []
+process = []
+bytes = []
+test-util = []
+tracing = []
+parking_lot = []
+mio = []

@@ -1,0 +1,12 @@
+[package]
+name = "tau"
+version = "0.1.0"
+edition = "2021"
+description = "Interface crate for Tau — plugins depend on this"
+build = "build.rs"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+# No external dependencies - tau is self-contained

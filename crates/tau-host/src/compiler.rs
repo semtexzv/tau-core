@@ -1,0 +1,403 @@
+//! Dynamic plugin compiler
+//!
+//! Handles detection of Rust toolchain and on-the-fly plugin compilation.
+//!
+//! # Same-compiler invariant
+//!
+//! This module enforces a critical invariant: **all plugins are compiled with the
+//! exact same `rustc` version and flags as the host binary.** This is verified at
+//! startup by comparing `HOST_RUSTC_VERSION` (captured at host build time) against
+//! the detected `rustc` on the system.
+//!
+//! This invariant guarantees that `repr(Rust)` type layouts are identical across
+//! the host and all plugins, which allows concrete data (String, Vec, structs, etc.)
+//! to be safely sent across plugin boundaries. See the [`tau`] crate-level docs
+//! for the full rules on what can and cannot cross the plugin boundary.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Paths to the interface crates that plugins compile against.
+pub struct InterfacePaths {
+    /// Path to the `tau` interface crate source (for IDE / fallback)
+    pub tau: PathBuf,
+    /// Path to the `tokio` shim crate source
+    pub tokio_shim: PathBuf,
+}
+
+/// Compiler configuration detected from environment
+pub struct Compiler {
+    pub rustc: PathBuf,
+    pub cargo: PathBuf,
+    pub sysroot: PathBuf,
+    pub std_dylib: PathBuf,
+    #[allow(dead_code)]
+    pub target: String,
+    pub version_string: String,
+}
+
+impl Compiler {
+    // Build-time captured environment
+    pub const HOST_VERSION: &'static str = env!("HOST_RUSTC_VERSION");
+    pub const HOST_RUSTFLAGS: &'static str = env!("HOST_RUSTFLAGS");
+    pub const HOST_TARGET: &'static str = env!("HOST_TARGET");
+    pub const HOST_PANIC: &'static str = env!("HOST_PANIC");
+    pub const HOST_TARGET_FEATURES: &'static str = env!("HOST_TARGET_FEATURES");
+
+    /// Resolve a compatible Rust compiler at runtime.
+    pub fn resolve() -> Result<Self, String> {
+        let rustc = Self::find_compatible_compiler()?;
+        
+        let sysroot = Self::query_sysroot(&rustc)?;
+        let target = Self::HOST_TARGET.to_string();
+        let std_search_dir = sysroot.join("lib/rustlib").join(&target).join("lib");
+        let std_dylib = Self::find_std_dylib(&std_search_dir)?;
+        
+        let cargo = Self::find_cargo(&rustc);
+
+        Ok(Self {
+            rustc,
+            cargo,
+            sysroot,
+            std_dylib,
+            target,
+            version_string: Self::HOST_VERSION.to_string(),
+        })
+    }
+
+    /// Compile a plugin from a Cargo crate directory.
+    /// Returns the path to the built dylib in the build cache.
+    pub fn compile_plugin(
+        &self,
+        source_dir: &Path,
+        interface_paths: &InterfacePaths,
+        dist_lib_path: &Path,
+    ) -> Result<PathBuf, String> {
+        let source_dir = source_dir
+            .canonicalize()
+            .map_err(|e| format!("Invalid source path: {}", e))?;
+
+        if !source_dir.join("Cargo.toml").exists() {
+            return Err(format!("Not a Cargo project: {:?}", source_dir));
+        }
+
+        let cache_dir = self.get_build_cache_dir(&source_dir, dist_lib_path)?;
+        let target_dir = cache_dir.join("target");
+        let is_release = !cfg!(debug_assertions);
+        let profile = if is_release { "release" } else { "debug" };
+
+        // Detect prebuilt crates (dylibs we can use via --extern)
+        let prebuilt = self.detect_prebuilt_crates(dist_lib_path);
+        
+        // Build rustflags
+        let rustflags = self.build_rustflags(dist_lib_path, &prebuilt);
+
+        // Prepare cargo command
+        let mut cmd = Command::new(&self.cargo);
+        cmd.current_dir(&source_dir)
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .env("DYLD_LIBRARY_PATH", self.build_dyld_path(dist_lib_path))
+            .env("RUSTC", &self.rustc)
+            .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
+            .env_remove("RUSTFLAGS");
+
+        // Add system library paths for native dependencies
+        self.inject_system_paths(&mut cmd, dist_lib_path);
+
+        // Add build arguments
+        if is_release {
+            cmd.args(["build", "--release"]);
+        } else {
+            cmd.arg("build");
+        }
+
+        // Inject crate patches (tokio shim, tau if not prebuilt)
+        self.inject_patches(&mut cmd, interface_paths, &prebuilt);
+
+        println!("[Compiler] Building plugin in {:?} ({})", source_dir, profile);
+
+        // Execute build
+        let output = cmd.output().map_err(|e| format!("Failed to run cargo: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!("Compilation failed:\n{}\n{}", stdout, stderr));
+        }
+
+        // Find the artifact and copy to plugins/ subdirectory
+        self.find_artifact(&source_dir, &target_dir.join(profile), &cache_dir.join("plugins"))
+    }
+
+    // =========================================================================
+    // Private helpers
+    // =========================================================================
+
+    fn find_compatible_compiler() -> Result<PathBuf, String> {
+        // Try rustc in PATH first
+        if let Ok(path) = Self::check_compiler_version("rustc", Self::HOST_VERSION) {
+            return Ok(path);
+        }
+
+        // Try rustup toolchain
+        let toolchain = Self::parse_toolchain_from_version(Self::HOST_VERSION)?;
+        println!("[Compiler] Resolving toolchain '{}'...", toolchain);
+
+        // Check if installed, install if not
+        if !Self::is_toolchain_installed(&toolchain) {
+            println!("[Compiler] Installing toolchain '{}'...", toolchain);
+            let status = Command::new("rustup")
+                .args(["toolchain", "install", &toolchain, "--profile", "minimal"])
+                .status()
+                .map_err(|e| format!("Failed to run rustup: {}", e))?;
+            if !status.success() {
+                return Err(format!("Failed to install toolchain '{}'", toolchain));
+            }
+        }
+
+        // Get the actual rustc path
+        let output = Command::new("rustup")
+            .args(["which", "rustc", "--toolchain", &toolchain])
+            .output()
+            .map_err(|e| format!("Failed to resolve rustc: {}", e))?;
+
+        if output.status.success() {
+            Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+        } else {
+            Err(format!("Could not find rustc for {}", Self::HOST_VERSION))
+        }
+    }
+
+    fn parse_toolchain_from_version(version: &str) -> Result<String, String> {
+        let version_token = version
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| format!("Invalid version: {}", version))?;
+
+        if version.to_lowercase().contains("-nightly") {
+            // Extract date for nightly: "rustc X.Y.Z-nightly (hash YYYY-MM-DD)"
+            if let Some(date) = version.split_whitespace().last() {
+                let date = date.trim_matches(')');
+                if date.len() == 10 && date.contains('-') {
+                    return Ok(format!("nightly-{}", date));
+                }
+            }
+            return Ok("nightly".to_string());
+        }
+
+        Ok(version_token.to_string())
+    }
+
+    fn is_toolchain_installed(toolchain: &str) -> bool {
+        Command::new("rustup")
+            .args(["run", toolchain, "rustc", "-V"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn check_compiler_version(cmd: &str, expected: &str) -> Result<PathBuf, String> {
+        let output = Command::new(cmd).arg("-V").output().map_err(|e| e.to_string())?;
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected {
+            Ok(PathBuf::from(cmd))
+        } else {
+            Err("Version mismatch".into())
+        }
+    }
+
+    fn query_sysroot(rustc: &Path) -> Result<PathBuf, String> {
+        let output = Command::new(rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .map_err(|e| format!("Failed to query sysroot: {}", e))?;
+        Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+    }
+
+    fn find_cargo(rustc: &Path) -> PathBuf {
+        if rustc.is_absolute() {
+            if let Some(cargo) = rustc.parent().map(|p| p.join("cargo")).filter(|p| p.exists()) {
+                return cargo;
+            }
+        }
+        PathBuf::from("cargo")
+    }
+
+    fn find_std_dylib(search_dir: &Path) -> Result<PathBuf, String> {
+        if !search_dir.exists() {
+            return Err(format!("Std lib dir not found: {:?}", search_dir));
+        }
+        for entry in std::fs::read_dir(search_dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("libstd-") && name_str.ends_with(".dylib") {
+                return Ok(entry.path());
+            }
+        }
+        Err("std dylib not found".into())
+    }
+
+    fn get_build_cache_dir(&self, source_dir: &Path, dist_lib_path: &Path) -> Result<PathBuf, String> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        let cache_root = home.join(".tau").join("buildcache");
+
+        let mut hasher = DefaultHasher::new();
+        source_dir.hash(&mut hasher);
+
+        // Include compiler version so toolchain changes invalidate the cache
+        self.version_string.hash(&mut hasher);
+
+        // Include libtau.dylib content hash so recompiling tau invalidates plugins
+        // (symbol hashes change when tau is rebuilt)
+        let tau_dylib = dist_lib_path.join("libtau.dylib");
+        if tau_dylib.exists() {
+            if let Ok(bytes) = std::fs::read(&tau_dylib) {
+                bytes.hash(&mut hasher);
+            }
+        }
+
+        let cache_dir = cache_root.join(format!("{:x}", hasher.finish()));
+
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| format!("Failed to create cache dir: {}", e))?;
+
+        Ok(cache_dir)
+    }
+
+    fn detect_prebuilt_crates(&self, dist_lib_path: &Path) -> PrebuiltCrates {
+        let mut crates = PrebuiltCrates::default();
+
+        // Check for libtau.dylib - use it via --extern for all crate compilations
+        let tau_dylib = dist_lib_path.join("libtau.dylib");
+        if tau_dylib.exists() {
+            crates.tau = Some(tau_dylib);
+        }
+
+        crates
+    }
+
+    fn build_rustflags(&self, dist_lib_path: &Path, prebuilt: &PrebuiltCrates) -> String {
+        let mut flags = Vec::new();
+
+        // Inherit host rustflags
+        if !Self::HOST_RUSTFLAGS.is_empty() {
+            flags.extend(Self::HOST_RUSTFLAGS.split('\x1f').map(String::from));
+        }
+
+        // Dynamic linking flags
+        flags.extend([
+            "-C".into(), "prefer-dynamic".into(),
+            "-C".into(), "link-args=-Wl,-undefined,dynamic_lookup".into(),
+            "-L".into(), dist_lib_path.display().to_string(),
+            "-C".into(), format!("panic={}", Self::HOST_PANIC),
+        ]);
+
+        // Target features (if any)
+        if !Self::HOST_TARGET_FEATURES.is_empty() {
+            flags.extend(["-C".into(), format!("target-feature={}", Self::HOST_TARGET_FEATURES)]);
+        }
+
+        // Add --extern for prebuilt crates
+        if let Some(tau_path) = &prebuilt.tau {
+            flags.extend([
+                "-L".into(), tau_path.parent().unwrap().display().to_string(),
+                format!("--extern=tau={}", tau_path.display()),
+            ]);
+            println!("[Compiler] Using prebuilt tau: {:?}", tau_path);
+        }
+
+        flags.join("\x1f")
+    }
+
+    fn build_dyld_path(&self, dist_lib_path: &Path) -> String {
+        let toolchain_lib = self.std_dylib.parent().unwrap();
+        format!("{}:{}", dist_lib_path.display(), toolchain_lib.display())
+    }
+
+    fn inject_system_paths(&self, cmd: &mut Command, dist_lib_path: &Path) {
+        let dist_root = dist_lib_path.parent().unwrap_or(dist_lib_path);
+
+        fn append_path(var: &str, path: &Path) -> String {
+            std::env::var(var)
+                .map(|existing| format!("{}:{}", path.display(), existing))
+                .unwrap_or_else(|_| path.display().to_string())
+        }
+
+        cmd.env("LIBRARY_PATH", append_path("LIBRARY_PATH", dist_lib_path))
+            .env("PKG_CONFIG_PATH", append_path("PKG_CONFIG_PATH", &dist_lib_path.join("pkgconfig")))
+            .env("CPATH", append_path("CPATH", &dist_root.join("include")));
+    }
+
+    fn inject_patches(&self, cmd: &mut Command, paths: &InterfacePaths, prebuilt: &PrebuiltCrates) {
+        // Always patch tokio to our shim
+        cmd.arg("--config")
+            .arg(format!("patch.crates-io.tokio.path=\"{}\"", paths.tokio_shim.display()));
+
+        // Only patch tau if not using prebuilt dylib
+        if prebuilt.tau.is_none() {
+            cmd.arg("--config")
+                .arg(format!("patch.crates-io.tau.path=\"{}\"", paths.tau.display()));
+            println!("[Compiler] Patching tau → {:?}", paths.tau);
+        }
+
+        println!("[Compiler] Patching tokio → {:?}", paths.tokio_shim);
+    }
+
+    fn find_artifact(
+        &self,
+        source_dir: &Path,
+        build_dir: &Path,
+        plugins_dir: &Path,
+    ) -> Result<PathBuf, String> {
+        // Parse package name from Cargo.toml
+        let manifest = std::fs::read_to_string(source_dir.join("Cargo.toml"))
+            .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
+
+        let package_name = manifest
+            .lines()
+            .find(|l| l.trim().starts_with("name"))
+            .and_then(|l| l.split('=').nth(1))
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .ok_or("Could not determine package name")?;
+
+        let crate_name = package_name.replace('-', "_");
+        let dylib_name = format!("lib{}.dylib", crate_name);
+        let built_path = build_dir.join(&dylib_name);
+
+        if !built_path.exists() {
+            return Err(format!("Artifact {} not found in {:?}", dylib_name, build_dir));
+        }
+
+        // Copy to plugins/ subdirectory for clean organization
+        std::fs::create_dir_all(plugins_dir)
+            .map_err(|e| format!("Failed to create plugins dir: {}", e))?;
+        
+        let final_path = plugins_dir.join(&dylib_name);
+        std::fs::copy(&built_path, &final_path)
+            .map_err(|e| format!("Failed to copy artifact: {}", e))?;
+        
+        println!("[Compiler] Plugin ready: {:?}", final_path);
+        Ok(final_path)
+    }
+}
+
+/// Tracks which crates have prebuilt dylibs available
+#[derive(Default)]
+struct PrebuiltCrates {
+    tau: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_compiler() {
+        let compiler = Compiler::resolve().expect("Should resolve compiler");
+        println!("rustc: {:?}", compiler.rustc);
+        println!("sysroot: {:?}", compiler.sysroot);
+        println!("std dylib: {:?}", compiler.std_dylib);
+    }
+}
