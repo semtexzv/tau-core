@@ -1,0 +1,3 @@
+[workspace]
+members = ["host", "tau", "example-plugin", "taukio"]
+resolver = "2"

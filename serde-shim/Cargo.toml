@@ -1,0 +1,21 @@
+[package]
+name = "serde"
+version = "1.0.0"
+edition = "2024"
+
+# This is a shim crate that re-exports the real serde
+# It will be prebuilt and injected into plugin builds
+
+[lib]
+crate-type = ["rlib", "dylib"]
+
+[dependencies]
+serde_real = { package = "serde", version = "1", features = ["derive"] }
+
+[features]
+default = ["derive", "std"]
+derive = []
+std = []
+alloc = []
+
+[workspace]
