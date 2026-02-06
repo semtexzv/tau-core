@@ -119,7 +119,7 @@ thread_local! {
 // Task
 // =============================================================================
 
-struct Task {
+pub(crate) struct Task {
     future_ptr: *mut (),
     poll_fn: RawPollFn,
     drop_fn: RawDropFn,
@@ -259,29 +259,29 @@ impl Runtime {
     /// Drop all tasks belonging to a plugin (for unload).
     /// Sets CURRENT_PLUGIN so any tau calls in destructors are tagged correctly.
     /// Returns the number of tasks dropped.
-    pub fn drop_plugin_tasks(&mut self, plugin_id: u64) -> usize {
+    /// Remove all tasks belonging to a plugin and return them.
+    /// The caller must drop the returned tasks OUTSIDE of any RUNTIME borrow
+    /// (same as `take_completed`).
+    pub fn take_plugin_tasks(&mut self, plugin_id: u64) -> Vec<Task> {
         let task_ids: Vec<u64> = self.tasks
             .iter()
             .filter(|(_, t)| t.plugin_id == plugin_id)
             .map(|(id, _)| *id)
             .collect();
         
-        let count = task_ids.len();
-        let prev_plugin = CURRENT_PLUGIN.load(Ordering::Relaxed);
-        CURRENT_PLUGIN.store(plugin_id, Ordering::Relaxed);
-        for task_id in task_ids {
+        let mut removed = Vec::with_capacity(task_ids.len());
+        for task_id in &task_ids {
             rt_debug!("dropping task_id={} for plugin_id={}", task_id, plugin_id);
-            self.tasks.remove(&task_id);
-            // Also remove from ready queue
-            self.ready_queue.retain(|id| *id != task_id);
+            if let Some(task) = self.tasks.remove(task_id) {
+                removed.push(task);
+            }
+            self.ready_queue.retain(|id| id != task_id);
         }
-        CURRENT_PLUGIN.store(prev_plugin, Ordering::Relaxed);
         
         // Remove timers associated with dropped tasks
         let timer_keys: Vec<_> = self.timers
             .iter()
             .filter(|(_, entry)| {
-                // Check if this timer's task was from the plugin
                 !self.tasks.contains_key(&entry.task_id)
             })
             .map(|(k, _)| *k)
@@ -290,7 +290,7 @@ impl Runtime {
             self.timers.remove(&key);
         }
         
-        count
+        removed
     }
 
     /// Check if a specific task is completed.
@@ -434,15 +434,18 @@ impl Runtime {
         snapshots
     }
 
-    /// Clean up completed tasks.
-    pub fn cleanup_completed(&mut self) {
+    /// Remove completed tasks from the map and return them.
+    /// The caller must drop the returned tasks OUTSIDE of any RUNTIME borrow,
+    /// because Task::drop calls (drop_fn)(future_ptr) which may call back into
+    /// the runtime (e.g., SleepFuture::drop → tau_timer_cancel).
+    pub fn take_completed(&mut self) -> Vec<Task> {
         let done: Vec<u64> = self.tasks.iter()
             .filter(|(_, t)| t.completed)
             .map(|(id, _)| *id)
             .collect();
-        for id in done {
-            self.tasks.remove(&id);
-        }
+        done.into_iter()
+            .filter_map(|id| self.tasks.remove(&id))
+            .collect()
     }
 
     /// Check if there are any live tasks.

@@ -120,7 +120,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-004: Abort integration test [ ]
+### US-004: Abort integration test [x]
 
 **Description:** As a developer, I want a test that proves task abort works end-to-end across the FFI boundary.
 
@@ -131,15 +131,15 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Test should cover: (1) abort idle task → immediate drop, (2) abort already-completed → no-op, (3) `Drop` impl runs on cancel (put a print/side-effect in the Drop), (4) `JoinHandle.await` → `JoinError::is_cancelled()`
 
 **Acceptance Criteria:**
-- [ ] Create `plugins/abort-test-plugin/` with a plugin that:
+- [x] Create `plugins/abort-test-plugin/` with a plugin that:
   - Spawns a long-running task (e.g., loops with `tau::sleep(1s).await`)
   - Stores the `JoinHandle` in a resource
   - On request "abort": calls `handle.abort()` on the stored handle
   - On request "check": reports whether the handle is finished
-- [ ] Add a test script in `tests/` that: loads the plugin, sends "spawn", sends "abort", sends "check", verifies the task is finished
-- [ ] Test passes via `cargo xtask test` or manual invocation
-- [ ] The aborted task's future destructor actually runs (verify with a print in a Drop impl)
-- [ ] `cargo build` succeeds for the workspace
+- [x] Add a test script in `tests/` that: loads the plugin, sends "spawn", sends "abort", sends "check", verifies the task is finished
+- [x] Test passes via `cargo xtask test` or manual invocation
+- [x] The aborted task's future destructor actually runs (verify with a print in a Drop impl)
+- [x] `cargo build` succeeds for the workspace
 
 ---
 

@@ -5,14 +5,18 @@ print Test: Abort idle task — future is dropped, handle reports finished
 
 load abort plugins/abort-test-plugin
 
-# Spawn a long-running task (sleeps 60s)
+# Spawn a long-running task (sleeps 60s).
+# Returns 0 so block_on returns immediately — child task is background.
 send abort spawn
 
-# Small delay to let the spawned task start and enter sleep
-sleep 50
+# Drive the executor so the spawned task gets polled (starts sleeping).
+drive 5
 
 # Abort the task
 send abort abort
+
+# Drive again to process the abort (cleanup, drop future)
+drive 5
 
 # Check that the task is now finished and its Drop ran
 send abort check
@@ -22,13 +26,10 @@ send abort check
 # =====================================================
 print Test: Abort already-completed task is a no-op
 
-# Spawn a task that completes immediately
+# Spawn a task that completes immediately (returns task_id so block_on drives it)
 send abort spawn-and-complete
 
-# Give it time to finish
-sleep 50
-
-# Abort should be a no-op (task already completed/removed)
+# Abort should be a no-op (task already completed and removed)
 send abort abort-completed
 
 # Cleanup

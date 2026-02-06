@@ -573,6 +573,15 @@ fn run_test_mode(host: &Host) {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
 
+            "drive" => {
+                // Drive the executor for N cycles (default 1).
+                // This polls background tasks that aren't waited on by block_on.
+                let cycles: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                for _ in 0..cycles {
+                    runtime::tau_drive();
+                }
+            }
+
             "assert_resource" => {
                 if parts.len() < 2 {
                     eprintln!("Usage: assert_resource <name>");

@@ -70,10 +70,13 @@ pub extern "C" fn tau_drive() -> u32 {
         }
     }
 
-    // Phase 4: cleanup
-    RUNTIME.with(|rt| {
-        rt.borrow_mut().cleanup_completed();
+    // Phase 4: extract completed tasks (brief borrow)
+    let dead_tasks = RUNTIME.with(|rt| {
+        rt.borrow_mut().take_completed()
     });
+    // Borrow is dropped here! Now dropping tasks is safe — their destructors
+    // can call back into the runtime (e.g., SleepFuture::drop → tau_timer_cancel).
+    drop(dead_tasks);
 
     completed
 }
@@ -190,7 +193,15 @@ pub fn clear_current_plugin() {
 /// Drop all tasks owned by a plugin (for unload).
 /// SAFETY: Call this BEFORE dlclose() to avoid dangling pointers.
 pub fn drop_plugin_tasks(plugin_id: u64) -> usize {
-    RUNTIME.with(|rt| rt.borrow_mut().drop_plugin_tasks(plugin_id))
+    let tasks = RUNTIME.with(|rt| rt.borrow_mut().take_plugin_tasks(plugin_id));
+    let count = tasks.len();
+    // Set current plugin so destructors can identify their plugin context
+    let prev_plugin = executor::CURRENT_PLUGIN.load(std::sync::atomic::Ordering::Relaxed);
+    executor::CURRENT_PLUGIN.store(plugin_id, std::sync::atomic::Ordering::Relaxed);
+    // Drop tasks OUTSIDE the borrow — their destructors may call back into the runtime
+    drop(tasks);
+    executor::CURRENT_PLUGIN.store(prev_plugin, std::sync::atomic::Ordering::Relaxed);
+    count
 }
 
 /// Drop all event subscriptions for a plugin.

@@ -1,14 +1,14 @@
 //! Abort test plugin — exercises task abort end-to-end across FFI.
 //!
 //! Commands:
-//!   "spawn"  — spawn a long-sleeping task, store its task_id in a resource
+//!   "spawn"  — spawn a long-sleeping task, store its task_id
 //!   "abort"  — abort the spawned task
-//!   "check"  — print whether the task is finished
-//!   "spawn-and-complete" — spawn a task that completes immediately, store task_id
-//!   "abort-completed" — abort the already-completed task (should be a no-op)
+//!   "check"  — print whether the task is finished and whether Drop ran
+//!   "spawn-and-complete" — spawn a task that completes immediately
+//!   "abort-completed" — abort the already-completed task (should be no-op)
 
 use serde::Deserialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Deserialize)]
 struct Message {
@@ -19,6 +19,12 @@ struct Message {
 
 /// Tracks whether the spawned future's Drop ran.
 static DROP_RAN: AtomicBool = AtomicBool::new(false);
+
+/// Stored task_id for the long-running task.
+static TASK_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Stored task_id for the completed task.
+static COMPLETED_TASK_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A guard that sets DROP_RAN when dropped — proves cancellation drops the future.
 struct DropDetector;
@@ -60,14 +66,15 @@ tau::define_plugin! {
                     println!("[abort-test] Long task completed (should NOT see this if aborted)");
                 });
                 let tid = handle.task_id();
-                // Store task_id as a resource so we can retrieve it in later requests
-                tau::resource::put("abort-test-task-id", tid);
+                TASK_ID.store(tid, Ordering::SeqCst);
                 println!("[abort-test] Spawned task_id={}", tid);
-                tid
+                // Return 0: don't make block_on wait for the child task
+                0
             }
 
             "abort" => {
-                if let Some(tid) = tau::resource::get::<u64>("abort-test-task-id") {
+                let tid = TASK_ID.load(Ordering::SeqCst);
+                if tid != 0 {
                     let result = unsafe { tau_task_abort(tid) };
                     println!("[abort-test] Aborted task_id={}, found={}", tid, result);
                 } else {
@@ -77,7 +84,8 @@ tau::define_plugin! {
             }
 
             "check" => {
-                if let Some(tid) = tau::resource::get::<u64>("abort-test-task-id") {
+                let tid = TASK_ID.load(Ordering::SeqCst);
+                if tid != 0 {
                     let finished = unsafe { tau_task_is_finished(tid) };
                     let drop_ran = DROP_RAN.load(Ordering::SeqCst);
                     println!("[abort-test] task_id={} is_finished={} drop_ran={}", tid, finished, drop_ran);
@@ -93,14 +101,15 @@ tau::define_plugin! {
                     42u32
                 });
                 let tid = handle.task_id();
-                tau::resource::put("abort-test-task-id", tid);
+                COMPLETED_TASK_ID.store(tid, Ordering::SeqCst);
                 println!("[abort-test] Spawned quick task_id={}", tid);
-                // Drop the handle — task is detached but still runs
+                // Return task_id so block_on drives it to completion
                 tid
             }
 
             "abort-completed" => {
-                if let Some(tid) = tau::resource::get::<u64>("abort-test-task-id") {
+                let tid = COMPLETED_TASK_ID.load(Ordering::SeqCst);
+                if tid != 0 {
                     let result = unsafe { tau_task_abort(tid) };
                     println!("[abort-test] Abort completed task_id={}, found={}", tid, result);
                 } else {

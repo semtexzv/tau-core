@@ -49,9 +49,16 @@ else
     fail "Task should have been spawned"
 fi
 
+# After drive, the task should have started sleeping
+if echo "$OUTPUT" | grep -q "\[abort-test\] Long task started, sleeping"; then
+    pass "Task started sleeping"
+else
+    fail "Task should have started sleeping after drive"
+fi
+
 # Abort should find the task
 if echo "$OUTPUT" | grep -q "\[abort-test\] Aborted task_id=.*found=1"; then
-    pass "Abort found the task"
+    pass "Abort found the task (found=1)"
 else
     fail "Abort should find the task (found=1)"
 fi
