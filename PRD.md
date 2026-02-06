@@ -35,6 +35,20 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ### Phase 1: Task Abort
 
+> **Reference: tokio abort semantics we are emulating**
+>
+> In tokio, `JoinHandle::abort()` works as follows:
+>
+> 1. **Abort marks the task, it doesn't kill it instantly.** The task's future is dropped at the *next* `.await` point — not mid-execution. If the task is currently being polled, abort sets a flag; the runtime drops the future after the current poll returns. If the task is idle (waiting on a waker), it is dropped immediately.
+> 2. **The future's `Drop` impl runs.** This is how cleanup happens — dropping the future drops all locals held across await points (files, locks, buffers, child tasks). This is Rust's cancellation model.
+> 3. **`JoinHandle` resolves to `Err(JoinError)`.** The error has `is_cancelled() == true`. If the task already completed (or panicked) before abort is called, abort is a no-op — the `JoinHandle` yields the original result.
+> 4. **Dropping a `JoinHandle` does NOT abort the task.** The task becomes "detached" and keeps running. Only an explicit `.abort()` or `AbortHandle::abort()` cancels it.
+> 5. **`AbortHandle` is a detached cancellation handle.** It can be cloned, sent to other tasks, and used to abort without owning the `JoinHandle`. Obtained via `JoinHandle::abort_handle()`.
+> 6. **`JoinSet::abort_all()`** calls `.abort()` on every tracked task. `JoinSet::shutdown()` aborts all and then awaits completion of each (drains the set).
+> 7. **Abort is idempotent.** Calling `.abort()` on an already-aborted or already-finished task is a no-op.
+>
+> Our implementation must match these semantics. The key difference from tokio is that we are single-threaded, so "currently being polled" means the abort call happens from within the same task's poll (re-entrant abort) or from a different task's poll in the same drive cycle.
+
 ---
 
 ### US-001: Add `tau_task_abort` FFI export to the host executor [ ]
