@@ -324,7 +324,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-011: Utility combinators — `next`, `collect`, `for_each`, `fold` [ ]
+### US-011: Utility combinators — `next`, `collect`, `for_each`, `fold` [x]
 
 **Description:** As a plugin developer, I want convenience methods for consuming streams so I can await the next item or collect all items.
 
@@ -336,14 +336,14 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key: `next()` takes `&mut self` (borrows, doesn't consume). `collect/fold/for_each` take `self` (consume).
 
 **Acceptance Criteria:**
-- [ ] Add to `StreamExt`:
+- [x] Add to `StreamExt`:
   - `async fn next(&mut self) -> Option<Self::Item>` where `Self: Unpin` — await the next item
   - `async fn collect<C: Default + Extend<Self::Item>>(self) -> C` where `Self: Sized` — collect all items into a container
   - `async fn for_each<F>(self, f: F)` where `F: FnMut(Self::Item)`, `Self: Sized` — consume all items
   - `async fn fold<B, F>(self, init: B, f: F) -> B` where `F: FnMut(B, Self::Item) -> B`, `Self: Sized`
-- [ ] Each is implemented as a future that polls the stream internally
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Each is implemented as a future that polls the stream internally
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

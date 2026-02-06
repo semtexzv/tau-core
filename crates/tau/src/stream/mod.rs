@@ -5,13 +5,16 @@
 //! tonic, kube, reqwest, etc.).
 //!
 //! Also provides [`StreamExt`] — an extension trait with synchronous
-//! combinators (`map`, `filter`, `filter_map`, `take_while`) and async
-//! combinators (`then`).
+//! combinators (`map`, `filter`, `filter_map`, `take_while`), async
+//! combinators (`then`), and terminal consumers (`next`, `collect`,
+//! `for_each`, `fold`).
 
 pub mod combinators;
+pub mod consumers;
 
 pub use futures_core::Stream;
 pub use combinators::{Map, Filter, FilterMap, TakeWhile, Then};
+pub use consumers::{Next, Collect, ForEach, Fold};
 
 /// Extension trait for [`Stream`] providing synchronous combinators.
 ///
@@ -63,6 +66,46 @@ pub trait StreamExt: Stream + Sized {
         Fut: core::future::Future,
     {
         Then::new(self, f)
+    }
+
+    /// Returns a future that yields the next item from the stream.
+    ///
+    /// The stream is borrowed, not consumed — it can be used again after
+    /// the returned future completes. Requires `Self: Unpin`.
+    fn next(&mut self) -> Next<'_, Self>
+    where
+        Self: Unpin,
+    {
+        Next::new(self)
+    }
+
+    /// Collects all stream items into a container (e.g., `Vec<T>`).
+    ///
+    /// Consumes the stream. The returned future resolves when the stream
+    /// is exhausted.
+    fn collect<C: Default + Extend<Self::Item>>(self) -> Collect<Self, C> {
+        Collect::new(self)
+    }
+
+    /// Calls a closure on every item, consuming the stream.
+    ///
+    /// The returned future resolves to `()` when the stream is exhausted.
+    fn for_each<F>(self, f: F) -> ForEach<Self, F>
+    where
+        F: FnMut(Self::Item),
+    {
+        ForEach::new(self, f)
+    }
+
+    /// Folds all stream items into a single accumulator value.
+    ///
+    /// Consumes the stream. The returned future resolves to the final
+    /// accumulator when the stream is exhausted.
+    fn fold<B, F>(self, init: B, f: F) -> Fold<Self, B, F>
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        Fold::new(self, init, f)
     }
 }
 

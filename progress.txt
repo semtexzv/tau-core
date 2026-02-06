@@ -285,3 +285,22 @@
   - `stream/` is now a module directory — future files (e.g., US-010 Then struct) can be added as separate files or in combinators.rs
 ---
 ## Task self-review PASSED
+
+## Iteration 5 - US-010: Async combinator — then (async map)
+- What was done:
+  - Added `Then<St, F, Fut>` combinator struct to `crates/tau/src/stream/combinators.rs`
+  - Two-state machine: polls in-flight future first, then polls source stream for next item
+  - Newly created futures are polled immediately (avoids unnecessary yield)
+  - Added `fn then()` to `StreamExt` trait in `crates/tau/src/stream/mod.rs`
+  - Exported `Then` from `crates/tau/src/stream/mod.rs`
+  - All 22 tests pass, build succeeds
+- Files changed:
+  - `crates/tau/src/stream/combinators.rs` — added Then struct + Stream impl
+  - `crates/tau/src/stream/mod.rs` — added then() to StreamExt, exported Then
+  - `PRD.md` — marked US-010 acceptance criteria and header complete
+- Learnings for future iterations:
+  - Pin reborrowing: `this.pending.as_mut().as_pin_mut()` is needed after `set()` because `as_pin_mut()` consumes the `Pin<&mut Option<Fut>>`
+  - The `then` combinator immediately polls a newly created future — this avoids an unnecessary Pending yield when the future is ready synchronously
+  - `size_hint` accounts for in-flight future (+1 when pending is Some)
+---
+## Task self-review PASSED
