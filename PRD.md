@@ -880,7 +880,7 @@ Crates like `which`, build tools, and agent frameworks (spawning `git`, `cargo`,
 
 ---
 
-### US-024: Process shim integration test [ ]
+### US-024: Process shim integration test [x]
 
 **Description:** As a developer, I want a test proving the process shim works end-to-end.
 
@@ -896,7 +896,43 @@ Crates like `which`, build tools, and agent frameworks (spawning `git`, `cargo`,
 
 ---
 
-### US-REVIEW-PHASE6: Review Process Shim (US-023 through US-024) [ ]
+### US-023a: Centralize SIGCHLD handling in `tau-rt` [x]
+
+**Description:** The implementation in US-023 uses a global SIGCHLD self-pipe in `tau-tokio`. Since `tau-tokio` is compiled into every plugin, each plugin overwrites the signal handler, breaking other plugins' ability to wait for children. Also, within a single plugin, the single reactor handle for the self-pipe causes a "thundering herd" issue where only one waiter wakes up.
+
+To fix this, we must centralize SIGCHLD handling in the shared `tau-rt` dylib.
+
+**Acceptance Criteria:**
+- [x] Add `pub extern "C" fn tau_sys_sigchld_subscribe(waker: FfiWaker)` to `tau-rt`
+- [x] `tau-rt` installs the SIGCHLD handler ONCE (global singleton in dylib)
+- [x] `tau-rt` maintains a `Vec<Waker>` of subscribers (protected by Mutex)
+- [x] When SIGCHLD fires (via self-pipe or similar mechanism in `tau-rt`), the reactor wakes the handler, which wakes **ALL** subscriber wakers
+- [x] Verify `tau-rt` only has one handler installation
+- [x] `cargo build` succeeds
+
+### US-023b: Update `tau-tokio` to use centralized SIGCHLD [x]
+
+**Description:** Update `tau-tokio` (and `tau` crate wrapper) to use the new centralized `tau-rt` SIGCHLD mechanism instead of the local self-pipe.
+
+**Acceptance Criteria:**
+- [x] Add `pub use rt::process;` to `tau/src/lib.rs`
+- [x] Remove `SIGCHLD_READ_FD`, `poll_sigchld`, `ensure_sigchld_handler` from `crates/tau-tokio/src/process/mod.rs`
+- [x] Update `Child::wait` logic:
+  - Instead of `poll_sigchld`, create an `FfiWaker` from `cx` and call `tau::process::tau_sys_sigchld_subscribe`
+  - When woken, check `try_wait`
+  - If `try_wait` returns `None` (not our child), re-subscribe and return Pending
+- [x] `cargo build` succeeds
+- [x] `plugins/process-test-plugin` still passes (or add a concurrency test case) - *Note: Tests failing due to unrelated dist environment issue (libc mismatch from US-023a)*
+
+### US-023c: Fix dist build `libc` mismatch [x]
+
+**Description:** The integration tests fail with `E0460: found possibly newer version of crate libc which tau_rt depends on` or `can't find crate for tau_rt`. This started after US-023a added `libc` dependency to `tau-rt`. We need to ensure `tau-rt` dylib and plugin compilations agree on `libc`.
+
+**Acceptance Criteria:**
+- [x] Fix `xtask dist` or `compiler.rs` to handle `libc` dependency correctly
+- [x] Verify `test-abort.sh` and `test-process.sh` pass
+
+### US-REVIEW-PHASE6: Review Process Shim (US-023 through US-024) [x]
 
 **Description:** Review US-023 through US-024 as a cohesive system.
 
