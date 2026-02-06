@@ -211,6 +211,33 @@ impl<T> Receiver<T> {
         self.inner.lock().unwrap().receiver_alive = false;
     }
 
+    /// Returns the number of messages in the channel.
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().queue.len()
+    }
+
+    /// Returns `true` if the channel is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns `true` if the channel has been closed (all senders dropped or receiver closed).
+    pub fn is_closed(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.sender_count == 0 || !inner.receiver_alive
+    }
+
+    /// Returns the current capacity of the channel (how many more items can be buffered).
+    pub fn capacity(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.capacity.saturating_sub(inner.queue.len())
+    }
+
+    /// Returns the maximum capacity of the channel.
+    pub fn max_capacity(&self) -> usize {
+        self.inner.lock().unwrap().capacity
+    }
+
     /// Polls to receive a message on this channel.
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let mut inner = self.inner.lock().unwrap();
@@ -338,6 +365,22 @@ impl<T> Drop for UnboundedReceiver<T> {
 impl<T> UnboundedReceiver<T> {
     pub fn close(&mut self) {
         self.inner.lock().unwrap().receiver_alive = false;
+    }
+
+    /// Returns the number of messages in the channel.
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().queue.len()
+    }
+
+    /// Returns `true` if the channel is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns `true` if the channel has been closed.
+    pub fn is_closed(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.sender_count == 0 || !inner.receiver_alive
     }
 
     pub async fn recv(&mut self) -> Option<T> {

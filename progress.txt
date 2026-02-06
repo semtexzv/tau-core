@@ -404,3 +404,30 @@
   - consumers.rs (futures) vs combinators.rs (streams) is a good organizational pattern
   - Merge's poll_stream helper is reusable for future N-way merge if needed
 ---
+
+## Iteration 10 - US-014: Verify real tokio-stream compiles against our tokio shim
+- What was done:
+  - Researched tokio-stream's tokio dependency: unconditionally requires `sync`, default feature `time`
+  - Added 6 missing methods to tau-tokio's mpsc module:
+    - `Receiver::len()`, `is_empty()`, `is_closed()`, `capacity()`, `max_capacity()`
+    - `UnboundedReceiver::len()`, `is_empty()`, `is_closed()`
+  - Added `watch::error` sub-module with re-exports (for WatchStream compatibility)
+  - Created `plugins/stream-test-plugin/` with tokio-stream 0.1 dependency (default features)
+  - Plugin uses `ReceiverStream::new(rx)`, `.map()`, `.filter()`, `.next()` from tokio_stream::StreamExt
+  - Documented full feature compatibility table in plugin doc comment
+  - tokio-stream v0.1.18 compiles successfully against tau-tokio shim
+  - All 65 workspace tests pass, cargo build succeeds
+- Files changed:
+  - `crates/tau-tokio/src/sync/mpsc.rs` — added len/is_empty/is_closed/capacity/max_capacity methods
+  - `crates/tau-tokio/src/sync/watch.rs` — added `pub mod error` re-export
+  - `plugins/stream-test-plugin/Cargo.toml` — new test plugin
+  - `plugins/stream-test-plugin/src/lib.rs` — new test plugin source
+  - `PRD.md` — marked US-014 complete
+- Learnings for future iterations:
+  - tokio-stream with default features only needs `sync` + `time` from tokio — our shim covers both
+  - Missing methods were trivial one-liners (len, capacity, etc.) — the real challenge was knowing which methods tokio-stream calls
+  - Optional features (net, signal, io-util, fs, sync) need more substantial APIs we don't have yet
+  - The `define_plugin!` macro requires init/destroy/request in that exact order
+  - Plugin spawned tasks may not run to completion if the host shuts down immediately — this is expected behavior
+## Task self-review PASSED
+---

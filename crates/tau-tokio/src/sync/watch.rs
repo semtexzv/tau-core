@@ -210,3 +210,10 @@ impl<T: std::fmt::Debug> std::fmt::Display for SendError<T> {
 }
 
 impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
+
+/// Sub-module so `tokio::sync::watch::error::RecvError` resolves
+/// (used by tokio-stream's WatchStream).
+pub mod error {
+    pub use super::RecvError;
+    pub use super::SendError;
+}

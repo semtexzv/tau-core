@@ -14,6 +14,8 @@ Several foundational primitives are missing from the runtime:
 
 4. **Crossterm without mio** — The `crossterm` crate depends on `mio` + `signal-hook-mio` for event polling. Since tau-core already has a reactor (backed by `polling` crate), we vendor crossterm and replace its mio-based event source with one using tau's IO primitives. This removes the mio dependency and unifies all IO through the tau reactor.
 
+5. **Fast plugin recompilation check** — `compile_plugin()` always invokes `cargo build`, even when nothing has changed (~265ms overhead for no-op). Cargo emits `.d` dep files (Makefile format) listing every source file that contributed to the artifact. By parsing the dep file and checking mtimes before invoking cargo, we can skip the build entirely when no sources have changed (~13ms).
+
 All primitives must integrate with the existing tokio shim so that crates like `reqwest`, `kube`, `tokio-stream`, and `futures` work transparently when compiled against the shim.
 
 ## Goals
@@ -29,6 +31,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 - Vendor crossterm with mio replaced by tau's reactor primitives, patched into plugins via `patches.list`
 - Support both sync (`crossterm::event::poll`/`read`) and async (`EventStream`) event APIs
 - Maintain all existing tokio shim compatibility — `reqwest`, `kube`, `tokio-util` must continue to compile and work
+- Restructure build cache: separate environment hash (compiler + flags + tau-rt) from plugin identity, enable dep-file fast path to skip cargo entirely when sources are unchanged
 - All changes pass `cargo build` for the workspace and `cargo xtask test`
 
 ## User Stories
@@ -191,6 +194,86 @@ All primitives must integrate with the existing tokio shim so that crates like `
   - Append "## Phase 1 review PASSED" to progress.txt
   - Mark this review task [x]
   - Commit: "docs: phase 1 review complete"
+
+---
+
+### Phase 1b: Compiler — Build Cache & Dep-File Fast Path
+
+---
+
+### US-COMP-001: Restructure build cache with environment hash [ ]
+
+**Description:** The current build cache layout hashes everything together (source dir + compiler version + tau-rt dylib content) into a single flat directory per plugin. This means: tau-rt is re-read and hashed on every build, compiler/env changes create N orphaned directories (one per plugin), and there's no way to garbage-collect stale caches.
+
+Restructure the cache into a two-level hierarchy: **environment hash** → **plugin directory**.
+
+> **🔍 Research before implementing:**
+> - Read `crates/tau-host/src/compiler.rs` `get_build_cache_dir()` — the current hashing logic
+> - Read `crates/tau-host/src/compiler.rs` `compile_plugin()` — how the cache dir is used
+> - Key: the environment hash should be computed ONCE at `Compiler::resolve()` time and stored on the `Compiler` struct. Individual `compile_plugin()` calls reuse it.
+
+**New cache layout:**
+
+```
+~/.tau/buildcache/
+  <env_hash>/                           # hash(compiler_version + rustflags + panic + target_features + tau_rt_content + patches_list)
+    example-plugin.<src_hash>/          # crate name + short hash of canonicalized source path
+      target/                           # cargo target dir
+      plugins/                          # final artifact copies
+    abort-test-plugin.<src_hash>/
+      target/
+      plugins/
+```
+
+**What goes into the environment hash:**
+- `Compiler::HOST_VERSION` (rustc version string)
+- `Compiler::HOST_RUSTFLAGS`
+- `Compiler::HOST_PANIC`
+- `Compiler::HOST_TARGET_FEATURES`
+- Content of `libtau_rt.dylib` (symbol hashes determine ABI — rebuilding tau-rt must invalidate all plugins)
+- The raw text of `patches.list` (which crates are patched and their relative paths)
+
+**What keys a plugin within the environment dir:**
+- Crate name (parsed from `Cargo.toml`) + short hash of the canonicalized source path (to disambiguate same-name plugins from different locations)
+
+**Acceptance Criteria:**
+- [ ] Compute `env_hash` once in `Compiler::resolve()` (or a new `Compiler::init_cache()` method), store on the struct
+- [ ] `get_build_cache_dir()` returns `~/.tau/buildcache/<env_hash>/<crate_name>.<src_hash>/`
+- [ ] Plugin crate name is parsed from `Cargo.toml` for the directory name (human-readable)
+- [ ] Old flat cache dirs (`~/.tau/buildcache/<single_hash>/`) are ignored (backward compat — they'll be cleaned up manually or by a future GC story)
+- [ ] When the environment changes (new compiler, rebuilt tau-rt, changed patches), all plugins get fresh build dirs automatically
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+- [ ] Manually verify: rebuild tau-rt → `cargo xtask dist` → `./dist/run.sh --plugin plugins/example-plugin` creates a new `<env_hash>/` dir
+
+---
+
+### US-COMP-002: Dep-file fast path — skip cargo when sources unchanged [ ]
+
+**Description:** `compile_plugin()` always invokes `cargo build`, even when nothing has changed. A no-op cargo build takes ~265ms (manifest parsing, lockfile resolution, patch injection, fingerprinting). Cargo emits `.d` dep files in Makefile format listing every source file that contributed to the final artifact. By parsing the dep file and checking mtimes, we can skip cargo entirely when no sources have changed (~13ms).
+
+> **🔍 Research before implementing:**
+> - Read the dep file format: `target/debug/lib<crate>.d` contains one line: `<output>: <dep1> <dep2> ...` — Makefile syntax, space-separated
+> - Examine existing dep files: `~/.tau/buildcache/*/target/debug/lib*.d` — verify the format, check that ALL transitive source deps are listed (plugin sources + patched crate sources + registry crate sources)
+> - Key: the dep file only covers source files. It does NOT list `libtau_rt.dylib` — that's already handled by the environment hash (US-COMP-001). If the env hash changes, we get a fresh build dir with no dep file, so cargo runs.
+> - Key: if the dep file or the artifact doesn't exist, fall through to cargo (first build).
+> - Key: if any listed source file is missing (deleted), fall through to cargo.
+> - Edge case: `Cargo.toml` and `Cargo.lock` changes (new dependency added) are NOT in the dep file. Consider also checking `Cargo.toml` mtime against the artifact.
+
+**Acceptance Criteria:**
+- [ ] Add a method `check_up_to_date(&self, cache_dir: &Path, source_dir: &Path) -> Option<PathBuf>` to `Compiler` that:
+  1. Finds the final artifact in `<cache_dir>/plugins/lib<crate>.dylib`
+  2. Finds the dep file at `<cache_dir>/target/<profile>/lib<crate>.d`
+  3. If either doesn't exist → return `None` (needs build)
+  4. Parses the dep file: extract all dependency paths after the `:` separator
+  5. Stats the artifact mtime
+  6. Also checks `<source_dir>/Cargo.toml` mtime against the artifact (catches dependency changes not in the dep file)
+  7. Stats every listed dependency — if ANY is newer than the artifact, or missing → return `None`
+  8. If all deps are older → return `Some(artifact_path)` (skip cargo)
+- [ ] `compile_plugin()` calls `check_up_to_date()` before invoking cargo. If it returns `Some(path)`, print `[Compiler] Plugin up-to-date (skipped): <path>` and return immediately
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+- [ ] Manually verify: `./dist/run.sh --plugin plugins/example-plugin` twice — second run prints "up-to-date" and is measurably faster
 
 ---
 
@@ -436,7 +519,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-014: Verify real `tokio-stream` compiles against our tokio shim [ ]
+### US-014: Verify real `tokio-stream` compiles against our tokio shim [x]
 
 **Description:** As a plugin developer, I want the real `tokio-stream` crate to compile against our tokio shim so that crates depending on `tokio-stream` work transparently — no separate shim crate needed.
 
@@ -448,14 +531,14 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key: if `tokio-stream` default features pull in modules we don't support (e.g., `signal`), the test plugin should disable those features.
 
 **Acceptance Criteria:**
-- [ ] Create a test plugin that depends on `tokio-stream = "0.1"` (the real crate) and uses `ReceiverStream`, `StreamExt`
-- [ ] Compile the test plugin using the existing `--config 'patch.crates-io.tokio.path=...'` mechanism (our tokio shim)
-- [ ] If compilation fails due to missing APIs in `tau-tokio`: add the missing APIs to the tokio shim (e.g., `broadcast` channel if a default feature needs it, or additional methods on existing types)
-- [ ] If `tokio-stream` pulls in feature-gated tokio modules we don't support: configure the test plugin's `tokio-stream` dependency with only the features that work (e.g., `default-features = false, features = ["sync", "time"]`)
-- [ ] The test plugin can: create an `mpsc` channel, wrap receiver in `ReceiverStream`, use `.next()`, `.map()`, `.filter()` from `tokio_stream::StreamExt`
-- [ ] Document which `tokio-stream` features work and which don't (if any) in a comment in the test plugin
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Create a test plugin that depends on `tokio-stream = "0.1"` (the real crate) and uses `ReceiverStream`, `StreamExt`
+- [x] Compile the test plugin using the existing `--config 'patch.crates-io.tokio.path=...'` mechanism (our tokio shim)
+- [x] If compilation fails due to missing APIs in `tau-tokio`: add the missing APIs to the tokio shim (e.g., `broadcast` channel if a default feature needs it, or additional methods on existing types)
+- [x] If `tokio-stream` pulls in feature-gated tokio modules we don't support: configure the test plugin's `tokio-stream` dependency with only the features that work (e.g., `default-features = false, features = ["sync", "time"]`)
+- [x] The test plugin can: create an `mpsc` channel, wrap receiver in `ReceiverStream`, use `.next()`, `.map()`, `.filter()` from `tokio_stream::StreamExt`
+- [x] Document which `tokio-stream` features work and which don't (if any) in a comment in the test plugin
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

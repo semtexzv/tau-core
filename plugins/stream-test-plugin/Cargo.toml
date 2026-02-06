@@ -1,0 +1,19 @@
+[package]
+name = "stream-test-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tau = { version = "0.1" }
+# Real tokio-stream crate — compiled against our tokio shim via patch.crates-io.tokio
+# Default features include "time" which requires tokio::time (supported by our shim).
+# We disable "signal" and "net" features which require APIs our shim doesn't fully support.
+# We also disable "fs" and "io-util" which need poll-based methods not in our shim.
+tokio-stream = { version = "0.1", default-features = true }
+# tokio (our shim) needed for mpsc channel creation
+tokio = { version = "1", features = ["sync", "time"] }
