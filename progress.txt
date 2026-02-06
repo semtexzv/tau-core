@@ -343,4 +343,21 @@
   - The `poll_stream` helper pattern is reusable for any combinator that needs to poll multiple sub-streams
   - VecStream test helper with ptr::read + custom Drop is needed for owned item streams in tests
 ## Task self-review PASSED
+
+## Iteration 8 - US-013: Stream combinator tests
+- What was done:
+  - Created `crates/tau/src/stream/tests.rs` with 38 comprehensive tests covering all combinators
+  - Tests cover: map (3), filter (4), filter_map (4), take_while (5), then (4), next (2), collect (2), for_each (2), fold (4), merge (4), chaining (4)
+  - Added `#[cfg(test)] mod tests;` to `crates/tau/src/stream/mod.rs`
+  - All 63 tau tests pass (38 new + 25 existing)
+  - Tests runnable via `cargo test -p tau`
+- Files changed:
+  - `crates/tau/src/stream/tests.rs` — new file, comprehensive combinator tests
+  - `crates/tau/src/stream/mod.rs` — added test module
+  - `PRD.md` — marked US-013 complete
+- Learnings for future iterations:
+  - Unit tests in tau crate are the right level for combinator testing — no FFI/runtime needed
+  - VecStream + noop_waker + collect_sync/poll_once pattern is duplicated from combinators.rs tests but in separate cfg(test) modules — acceptable
+  - Combinator chaining tests verify composability across different combinator types
+## Task self-review PASSED
 ---
