@@ -222,3 +222,41 @@
   - The US-006 task was removed from the PRD but its implementation was not reverted. Always check if orphaned code from removed tasks persists.
   - The `tau::stream` module should be minimal: just the `Stream` trait re-export (and later, combinators). Channel creation is NOT its responsibility.
 ---
+
+## Iteration 2 - US-005a: Remove custom FFI stream channel infrastructure
+- What was done:
+  - Deleted `crates/tau-host/src/runtime/streams.rs` entirely (host-side StreamState ring buffer, all tau_stream_* FFI exports)
+  - Removed `pub mod streams;` from `crates/tau-host/src/runtime/mod.rs`
+  - Reverted `crates/tau/src/stream.rs` to minimal 7-line file with only `pub use futures_core::Stream;`
+  - Verified no other files reference tau_stream_* or StreamSender/StreamReceiver (only the two removed/reverted files)
+  - Build succeeds, all 22 tests pass
+- Files changed:
+  - `crates/tau-host/src/runtime/streams.rs` — deleted
+  - `crates/tau-host/src/runtime/mod.rs` — removed `pub mod streams;`
+  - `crates/tau/src/stream.rs` — reverted to minimal re-export
+  - `PRD.md` — marked US-005a complete
+- Learnings for future iterations:
+  - PRD design principles are enforced: "No custom FFI for things Rust already provides" — standard channel crates work across plugins via same-compiler ABI invariant
+  - The `tau::stream` module is now clean and minimal — ready for combinators (US-009+)
+---
+## Task self-review PASSED
+
+## Iteration 3 - US-REVIEW-PHASE2: Review Stream Core (US-005)
+- What was done: Final review pass of US-005 after US-005a cleanup
+- Files reviewed:
+  - `crates/tau/src/stream.rs` — 7-line file, clean re-export of `futures_core::Stream`
+  - `crates/tau/src/lib.rs` — `pub mod stream;` correctly wired
+  - `crates/tau/Cargo.toml` — `futures-core = "0.3"` minimal semver bound
+- Verification:
+  - ✅ `tau::stream::Stream` is `futures_core::Stream` re-export (not custom trait)
+  - ✅ No custom FFI channel infrastructure remains (grep for tau_stream_*, StreamSender, StreamReceiver — all clean)
+  - ✅ `futures-core` resolves to exactly one version (v0.3.31) across the workspace
+  - ✅ Code is minimal and elegant: doc comment + one re-export line
+  - ✅ No orphaned host-side code (`streams.rs` deleted, `pub mod streams` removed)
+
+## Phase 2 review PASSED
+- Learnings for future iterations:
+  - US-005 is now clean after US-005a removed the custom FFI channel code
+  - The `tau::stream` module is the right place for future combinator additions (US-009+)
+  - Single version of futures-core confirmed — no diamond dependency issues
+---

@@ -246,7 +246,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-REVIEW-PHASE2: Review Stream Core (US-005) [ ]
+### US-REVIEW-PHASE2: Review Stream Core (US-005) [x]
 
 **Description:** Review US-005 as a cohesive system.
 
