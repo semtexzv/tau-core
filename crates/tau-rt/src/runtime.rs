@@ -39,6 +39,7 @@ extern "C" {
     fn tau_timer_check(handle: u64) -> u8;
     fn tau_timer_cancel(handle: u64);
     fn tau_task_abort(task_id: u64) -> u8;
+    fn tau_task_is_finished(task_id: u64) -> u8;
 }
 
 // =============================================================================

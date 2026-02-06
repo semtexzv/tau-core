@@ -91,7 +91,7 @@ impl<T> JoinHandle<T> {
 
     /// Get an AbortHandle for this task.
     pub fn abort_handle(&self) -> task::AbortHandle {
-        task::AbortHandle::new()
+        task::AbortHandle::new(self.inner.task_id())
     }
 
     /// Check if the task has finished.

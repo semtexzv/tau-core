@@ -150,6 +150,14 @@ pub extern "C" fn tau_task_abort(task_id: u64) -> u8 {
     })
 }
 
+/// Check if a task is finished (completed, aborted, or removed).
+#[no_mangle]
+pub extern "C" fn tau_task_is_finished(task_id: u64) -> u8 {
+    RUNTIME.with(|rt| {
+        if rt.borrow().is_task_finished(task_id) { 1 } else { 0 }
+    })
+}
+
 // =============================================================================
 // Plugin ID export (used by tau::resource and tau::event)
 // =============================================================================

@@ -342,6 +342,14 @@ impl Runtime {
         true
     }
 
+    /// Check if a task is finished (completed, aborted, or already removed).
+    pub fn is_task_finished(&self, task_id: u64) -> bool {
+        match self.tasks.get(&task_id) {
+            Some(t) => t.completed,
+            None => true, // already removed = finished
+        }
+    }
+
     /// Remove a completed task.
     pub fn remove_task(&mut self, task_id: u64) {
         self.tasks.remove(&task_id);

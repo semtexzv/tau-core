@@ -204,24 +204,34 @@ impl<T: 'static> Drop for JoinSet<T> {
 // =============================================================================
 
 /// A handle that can be used to abort a spawned task.
+///
+/// Unlike `JoinHandle`, this can be cloned and sent to other tasks.
+/// Obtained via `JoinHandle::abort_handle()`.
 #[derive(Clone)]
 pub struct AbortHandle {
-    // Simplified: just a marker, actual abort not fully implemented
-    _phantom: std::marker::PhantomData<()>,
+    task_id: u64,
 }
 
 impl AbortHandle {
-    pub(crate) fn new() -> Self {
-        Self { _phantom: std::marker::PhantomData }
+    pub(crate) fn new(task_id: u64) -> Self {
+        Self { task_id }
     }
 
     /// Abort the associated task.
+    ///
+    /// If the task has already completed, this is a no-op.
     pub fn abort(&self) {
-        // Simplified: abort not fully implemented
+        extern "C" {
+            fn tau_task_abort(task_id: u64) -> u8;
+        }
+        unsafe { tau_task_abort(self.task_id) };
     }
 
-    /// Check if the task was aborted.
+    /// Check if the task has finished (completed or aborted).
     pub fn is_finished(&self) -> bool {
-        false
+        extern "C" {
+            fn tau_task_is_finished(task_id: u64) -> u8;
+        }
+        unsafe { tau_task_is_finished(self.task_id) != 0 }
     }
 }

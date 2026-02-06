@@ -95,7 +95,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-003: Wire abort through tokio shim `JoinHandle` and `AbortHandle` [ ]
+### US-003: Wire abort through tokio shim `JoinHandle` and `AbortHandle` [x]
 
 **Description:** As a user of tokio APIs, I want `tokio::JoinHandle::abort()` and `AbortHandle::abort()` to cancel tasks so that crates using tokio's cancellation patterns work correctly.
 
@@ -108,15 +108,15 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key: `JoinSet::join_next()` must handle interleaved completed/aborted tasks — cancelled tasks yield `Err(JoinError)` just like completed ones yield `Ok(T)`
 
 **Acceptance Criteria:**
-- [ ] `crates/tau-tokio/src/lib.rs` `JoinHandle::abort()` delegates to `self.inner.abort()` (already does, now it works)
-- [ ] `AbortHandle` in `crates/tau-tokio/src/task/mod.rs` stores the `task_id` (currently it's a phantom marker)
-- [ ] `AbortHandle::abort()` calls `tau_task_abort(task_id)` via a new FFI function or through the `tau` crate
-- [ ] `AbortHandle::is_finished()` calls through to check task state
-- [ ] `JoinHandle` future impl returns `Err(JoinError)` when the task was aborted, with `JoinError::is_cancelled() == true`
-- [ ] `JoinSet::abort_all()` actually aborts all tasks (it calls `handle.abort()` which now works)
-- [ ] `JoinSet::shutdown()` aborts and then drains all handles
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] `crates/tau-tokio/src/lib.rs` `JoinHandle::abort()` delegates to `self.inner.abort()` (already does, now it works)
+- [x] `AbortHandle` in `crates/tau-tokio/src/task/mod.rs` stores the `task_id` (currently it's a phantom marker)
+- [x] `AbortHandle::abort()` calls `tau_task_abort(task_id)` via a new FFI function or through the `tau` crate
+- [x] `AbortHandle::is_finished()` calls through to check task state
+- [x] `JoinHandle` future impl returns `Err(JoinError)` when the task was aborted, with `JoinError::is_cancelled() == true`
+- [x] `JoinSet::abort_all()` actually aborts all tasks (it calls `handle.abort()` which now works)
+- [x] `JoinSet::shutdown()` aborts and then drains all handles
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 
