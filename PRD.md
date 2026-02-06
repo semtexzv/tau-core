@@ -55,6 +55,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 **Description:** As a plugin developer, I want to abort a spawned task so that its future is dropped and resources are freed.
 
+> **🔍 Research before implementing:**
+> - Read `crates/tau-host/src/runtime/executor.rs` — understand `Task` struct, `ready_queue`, `drive()` loop, `cleanup_completed()`
+> - Read tokio's task harness: https://docs.rs/tokio/latest/src/tokio/runtime/task/harness.rs.html — see how `remote_abort()` sets the CANCELLED flag, how the scheduler drops the future
+> - Read tokio's `OwnedTasks::close_and_shutdown_all()` for bulk abort semantics
+> - Key concern: what if `abort()` is called while the task is currently being polled? In tokio, the task is NOT dropped mid-poll — the abort flag is checked after `poll()` returns. Our single-threaded runtime has the same constraint: if task A's poll calls `task_B.abort()`, task B's future must not be dropped until after A's poll returns and the drive loop checks B.
+
 **Acceptance Criteria:**
 - [ ] Add `aborted: bool` flag to the `Task` struct in `crates/tau-host/src/runtime/executor.rs`
 - [ ] Add `pub fn abort_task(&mut self, task_id: u64) -> bool` method on `Runtime` that sets the `aborted` flag and returns whether the task existed
@@ -71,6 +77,13 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 **Description:** As a plugin developer, I want `JoinHandle::abort()` to actually cancel the task so I get Rust-standard cancellation semantics.
 
+> **🔍 Research before implementing:**
+> - Read `crates/tau/src/runtime.rs` — current `JoinHandle`, `TaskCell`, `Stage` enum, `WrapperFuture`
+> - Read `crates/tau-rt/src/runtime.rs` — FFI declarations (`tau_spawn`, `tau_task_poll`, etc.)
+> - Read tokio `JoinHandle` API: https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html — note that `.await`ing an aborted handle returns `Err(JoinError)`, and `JoinError` has `is_cancelled()`, `is_panic()`, `into_panic()`
+> - Read tokio `JoinError`: https://docs.rs/tokio/latest/tokio/task/struct.JoinError.html — understand the three states: completed, cancelled, panicked
+> - Key: dropping a `JoinHandle` does NOT abort — it detaches the task. Only explicit `.abort()` cancels.
+
 **Acceptance Criteria:**
 - [ ] Add `extern "C" { fn tau_task_abort(task_id: u64) -> u8; }` declaration in `crates/tau/src/runtime.rs`
 - [ ] `JoinHandle::abort(&self)` calls `tau_task_abort(self.task_id)`
@@ -85,6 +98,14 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-003: Wire abort through tokio shim `JoinHandle` and `AbortHandle` [ ]
 
 **Description:** As a user of tokio APIs, I want `tokio::JoinHandle::abort()` and `AbortHandle::abort()` to cancel tasks so that crates using tokio's cancellation patterns work correctly.
+
+> **🔍 Research before implementing:**
+> - Read `crates/tau-tokio/src/task/mod.rs` — current `JoinHandle`, `AbortHandle`, `JoinSet`, `JoinError` stubs
+> - Read `crates/tau-tokio/src/lib.rs` — `spawn()`, how it wraps `tau::spawn()`
+> - Read tokio `AbortHandle`: https://docs.rs/tokio/latest/tokio/task/struct.AbortHandle.html — `abort()`, `is_finished()`. Note it's `Clone + Send + Sync`.
+> - Read tokio `JoinSet`: https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html — `abort_all()`, `shutdown()` (async, aborts + awaits all), `join_next()` returns `Option<Result<T, JoinError>>`, `detach_all()`
+> - Key: `JoinSet::shutdown()` is an async method that calls `abort_all()` then loops `join_next().await` until `None`
+> - Key: `JoinSet::join_next()` must handle interleaved completed/aborted tasks — cancelled tasks yield `Err(JoinError)` just like completed ones yield `Ok(T)`
 
 **Acceptance Criteria:**
 - [ ] `crates/tau-tokio/src/lib.rs` `JoinHandle::abort()` delegates to `self.inner.abort()` (already does, now it works)
@@ -102,6 +123,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-004: Abort integration test [ ]
 
 **Description:** As a developer, I want a test that proves task abort works end-to-end across the FFI boundary.
+
+> **🔍 Research before implementing:**
+> - Read existing test plugins `plugins/example-plugin/` and `plugins/second-plugin/` for the plugin structure pattern
+> - Read `crates/tau-host/src/main.rs` — how plugins are loaded, how requests are dispatched
+> - Read tokio's own abort test: https://github.com/tokio-rs/tokio/blob/master/tokio/tests/task_abort.rs — covers: abort before first poll, abort during sleep, abort already-completed task, `JoinError::is_cancelled()`
+> - Test should cover: (1) abort idle task → immediate drop, (2) abort already-completed → no-op, (3) `Drop` impl runs on cancel (put a print/side-effect in the Drop), (4) `JoinHandle.await` → `JoinError::is_cancelled()`
 
 **Acceptance Criteria:**
 - [ ] Create `plugins/abort-test-plugin/` with a plugin that:
@@ -150,6 +177,22 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ### Phase 2: Stream Trait & Core Types
 
+> **Reference: futures-core Stream trait**
+>
+> The standard `Stream` trait lives in `futures-core` (not `futures` — that's a mega-crate re-exporting it):
+> ```rust
+> pub trait Stream {
+>     type Item;
+>     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>>;
+>     fn size_hint(&self) -> (usize, Option<usize>) { (0, None) }
+> }
+> ```
+> - Docs: https://docs.rs/futures-core/latest/futures_core/stream/trait.Stream.html
+> - `futures-core` is a minimal crate (~no deps) that ONLY defines traits. Every async crate depends on it (`hyper`, `tower`, `tonic`, `kube`, `reqwest` via `hyper`).
+> - `tokio-stream` re-exports `futures_core::Stream` and provides `StreamExt` (combinators + adapters).
+> - `futures` re-exports `futures_core::Stream` and provides its own `StreamExt` (slightly different set of combinators).
+> - Key decision: we re-export the SAME trait from `futures-core`, so there's zero impedance mismatch with the ecosystem. We do NOT define our own Stream trait.
+
 ---
 
 ### US-005: Re-export `futures_core::Stream` in the `tau` crate [ ]
@@ -169,6 +212,13 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-006: `StreamHandle` — FFI-safe stream with push/poll/close [ ]
 
 **Description:** As a plugin developer, I want to create streams that work across the FFI boundary so plugins can produce data the host (or other plugins) consume.
+
+> **🔍 Research before implementing:**
+> - Read `crates/tau-host/src/runtime/events.rs` — existing FFI event bus pattern (OnceLock + Mutex + HashMap + u64 handles). StreamHandle should follow the same pattern.
+> - Read `crates/tau-host/src/runtime/resources.rs` — existing resource store pattern (plugin_id tracking for cleanup on unload)
+> - Read `crates/tau/src/event.rs` — plugin-side FFI wrappers, how `FfiWaker` is used in `tau_event_subscribe_poll`
+> - Read tokio `mpsc` channel: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html — the bounded sender/receiver split pattern. Our `StreamSender`/`StreamReceiver` is conceptually the same but byte-oriented and FFI-safe.
+> - Key: this is NOT a typed channel (that's US-007). This is raw bytes across FFI. Think of it as `mpsc::channel<Vec<u8>>` but the storage is host-side and accessed via opaque handles.
 
 **Acceptance Criteria:**
 - [ ] Add FFI declarations to `crates/tau/src/stream.rs`:
@@ -195,6 +245,11 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 **Description:** As a plugin developer, I want typed streams so I can send/receive structured data without manual serialization.
 
+> **🔍 Research before implementing:**
+> - Read `crates/tau/src/event.rs` — existing `emit<T: Serialize>` / `subscribe<T: DeserializeOwned>` pattern with JSON serialization. The typed stream wrappers follow the same approach.
+> - Read `crates/tau/src/types.rs` — existing `Value` type and serde usage
+> - Key: `TypedStreamReceiver<T>` implements `Stream<Item = T>` (NOT `Stream<Item = Result<T, ...>>`). If deserialization fails, panic or log+skip — this is a same-compiler system, so serialization mismatches are bugs, not runtime errors.
+
 **Acceptance Criteria:**
 - [ ] Add `TypedStreamSender<T: Serialize>` wrapping `StreamSender` — `send(&self, value: &T)` serializes to bytes and pushes
 - [ ] Add `TypedStreamReceiver<T: DeserializeOwned>` wrapping `StreamReceiver` — implements `Stream<Item = T>` by deserializing from bytes
@@ -208,6 +263,11 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-008: Stream integration test — basic push/poll across FFI [ ]
 
 **Description:** As a developer, I want a test proving streams work end-to-end across the plugin boundary.
+
+> **🔍 Research before implementing:**
+> - Read existing test plugins `plugins/example-plugin/`, `plugins/second-plugin/` for the pattern
+> - Read `crates/tau-host/src/main.rs` — how plugin requests work, how to trigger from the host
+> - Key edge cases to test: (1) push to closed stream, (2) poll after sender dropped (should get remaining items then None), (3) drop receiver while sender still has items (sender push should return `closed`), (4) zero-capacity stream (rendezvous — push blocks until poll)
 
 **Acceptance Criteria:**
 - [ ] Create `plugins/stream-test-plugin/` that:
@@ -256,11 +316,24 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ### Phase 3: Stream Combinators
 
+> **Reference: existing combinator implementations to study**
+>
+> - `futures-rs` StreamExt source: https://github.com/rust-lang/futures-rs/tree/master/futures-util/src/stream — canonical implementations of all combinators (`map.rs`, `filter.rs`, `filter_map.rs`, `then.rs`, `take_while.rs`, `fold.rs`, `for_each.rs`, `next.rs`, `collect.rs`)
+> - `tokio-stream` StreamExt source: https://github.com/tokio-rs/tokio/tree/master/tokio-stream/src — slightly different set, includes `merge`, `StreamMap`
+> - Our `StreamExt` should have the same method signatures as `futures::StreamExt` where they overlap. This way plugins that import both won't get ambiguity errors (Rust resolves to the same-named method if signatures match).
+> - Pin projection: use `pin-project-lite` or manual `unsafe` pin projections. `futures-rs` uses `pin_project!` macro from `pin-project-lite`. Read: https://docs.rs/pin-project-lite/latest/pin_project_lite/
+
 ---
 
 ### US-009: Synchronous combinators — `map`, `filter`, `filter_map`, `take_while` [ ]
 
 **Description:** As a plugin developer, I want to transform and filter streams so I can build data pipelines without manual poll loops.
+
+> **🔍 Research before implementing:**
+> - Read `futures-util` source for each combinator struct: https://github.com/rust-lang/futures-rs/blob/master/futures-util/src/stream/stream/map.rs — see how `Map<St, F>` uses `pin_project!`, stores stream + closure, delegates `poll_next`
+> - Read the `filter.rs` source — note it loops in `poll_next` to skip non-matching items (doesn't return `Pending` on filter miss — it re-polls the source)
+> - Read `take_while.rs` — note it transitions to a "done" state once the predicate returns false, then always returns `None`
+> - Key: each combinator struct must implement `Stream`. The `StreamExt` trait just provides the constructor method. Keep structs in separate files or one `combinators.rs`.
 
 **Acceptance Criteria:**
 - [ ] Create `crates/tau/src/stream/combinators.rs` (or keep in `stream.rs` if small enough)
@@ -280,6 +353,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 **Description:** As a plugin developer, I want an async transform on streams so I can do async work (HTTP calls, DB queries, LLM calls) per stream item.
 
+> **🔍 Research before implementing:**
+> - Read `futures-util` `then.rs`: https://github.com/rust-lang/futures-rs/blob/master/futures-util/src/stream/stream/then.rs — the two-state machine: either waiting for the source stream or waiting for the in-flight future
+> - Note the difference between `then` (async map, always produces a value) and `filter_map` (sync, may skip). `then` is the async equivalent of `map`.
+> - Key subtlety: the in-flight future must be pinned. `futures-rs` uses `#[pin] future: Option<Fut>` inside a `pin_project!` struct. When the future completes, it's set to `None` and the source stream is polled for the next item.
+> - Also study `and_then` in futures-rs — similar but for `Stream<Item = Result<T, E>>` where the async closure returns `Result`. We may want this later for error chains.
+
 **Acceptance Criteria:**
 - [ ] Add `fn then<F, Fut>(self, f: F) -> Then<Self, F, Fut>` to `StreamExt` where `F: FnMut(Self::Item) -> Fut`, `Fut: Future`
 - [ ] `Then` struct holds the source stream and an `Option<Fut>` for the in-flight future
@@ -293,6 +372,13 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-011: Utility combinators — `next`, `collect`, `for_each`, `fold` [ ]
 
 **Description:** As a plugin developer, I want convenience methods for consuming streams so I can await the next item or collect all items.
+
+> **🔍 Research before implementing:**
+> - Read `futures-util` `next.rs`: https://github.com/rust-lang/futures-rs/blob/master/futures-util/src/stream/stream/next.rs — `Next` is a future that borrows `&mut St`, polls it once. Note: requires `St: Unpin` because it takes `&mut self`.
+> - Read `collect.rs`: https://github.com/rust-lang/futures-rs/blob/master/futures-util/src/stream/stream/collect.rs — takes ownership of stream, polls until `None`, extends the collection
+> - Read `fold.rs`, `for_each.rs` — same consume-until-None pattern
+> - Key: these are "terminal" operations — they consume the stream. They're implemented as futures (not streams). The `StreamExt` methods return these futures, which the caller `.await`s.
+> - Key: `next()` takes `&mut self` (borrows, doesn't consume). `collect/fold/for_each` take `self` (consume).
 
 **Acceptance Criteria:**
 - [ ] Add to `StreamExt`:
@@ -309,6 +395,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-012: `merge` — combine two streams into one [ ]
 
 **Description:** As a plugin developer, I want to merge multiple streams so I can process items from different sources in arrival order.
+
+> **🔍 Research before implementing:**
+> - Read `tokio-stream` `merge.rs`: https://github.com/tokio-rs/tokio/blob/master/tokio-stream/src/stream_ext/merge.rs — note the `flag: bool` that alternates which stream is polled first for fairness
+> - Read `futures-rs` `select.rs` (their name for merge): https://github.com/rust-lang/futures-rs/blob/master/futures-util/src/stream/select.rs — same alternation approach, uses `FusedStream` to track which streams are done
+> - Key: `Merge` must handle one stream finishing before the other — it should continue yielding from the remaining stream until both are done, then return `None`.
+> - Key: the fairness toggle prevents starvation: poll A first on even calls, B first on odd calls (or vice versa).
 
 **Acceptance Criteria:**
 - [ ] Add `fn merge<S2>(self, other: S2) -> Merge<Self, S2>` to `StreamExt` where `S2: Stream<Item = Self::Item>`
@@ -374,11 +466,31 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ### Phase 4: Tokio-Stream Shim
 
+> **Reference: tokio-stream crate structure**
+>
+> `tokio-stream` (https://docs.rs/tokio-stream/latest/tokio_stream/) is a separate crate from `tokio` that provides:
+> - Re-export of `futures_core::Stream`
+> - `StreamExt` trait with combinators (`next`, `map`, `filter`, `merge`, `timeout`, `throttle`, etc.)
+> - Adapter types: `ReceiverStream` (wraps `mpsc::Receiver`), `UnboundedReceiverStream`, `BroadcastStream`, `WatchStream`, `SignalStream`
+> - `StreamMap` — a keyed collection of streams, polls all, yields `(K, V)` pairs
+> - `wrappers` module with `IntervalStream`, `TcpListenerStream`, etc.
+>
+> Key feature flags: `sync` (mpsc/watch/broadcast adapters), `time` (interval/timeout), `net` (tcp/unix listeners), `signal`, `io-util`, `fs`.
+>
+> Our approach: rather than shimming `tokio-stream`, we test that the **real** `tokio-stream` crate compiles against our **tokio shim** (tau-tokio). Since `tokio-stream` depends on `tokio`, and our `patches.list` replaces `tokio` with `tau-tokio`, `tokio-stream` will build against our shim. We only need to add any missing API surface in `tau-tokio` that `tokio-stream` requires.
+
 ---
 
 ### US-014: Verify real `tokio-stream` compiles against our tokio shim [ ]
 
 **Description:** As a plugin developer, I want the real `tokio-stream` crate to compile against our tokio shim so that crates depending on `tokio-stream` work transparently — no separate shim crate needed.
+
+> **🔍 Research before implementing:**
+> - Read `tokio-stream` Cargo.toml for its tokio dependency: https://github.com/tokio-rs/tokio/blob/master/tokio-stream/Cargo.toml — note which tokio features it requires (`sync`, `time`, etc.)
+> - Read `crates/tau-tokio/src/lib.rs` and `crates/tau-tokio/Cargo.toml` — what features/modules we currently expose
+> - Read `tokio-stream/src/wrappers/mpsc_bounded.rs`: https://github.com/tokio-rs/tokio/blob/master/tokio-stream/src/wrappers/mpsc_bounded.rs — `ReceiverStream` wraps `tokio::sync::mpsc::Receiver` and implements `Stream`. Check if our `mpsc::Receiver` has all the methods it calls.
+> - Key: `tokio-stream` may use `tokio::sync::mpsc::Receiver::poll_recv()` — verify our shim has this method.
+> - Key: if `tokio-stream` default features pull in modules we don't support (e.g., `signal`), the test plugin should disable those features.
 
 **Acceptance Criteria:**
 - [ ] Create a test plugin that depends on `tokio-stream = "0.1"` (the real crate) and uses `ReceiverStream`, `StreamExt`
@@ -395,6 +507,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-015: Verify `futures-core` resolves correctly in plugin builds [ ]
 
 **Description:** As a developer, I want to verify that `futures-core` (used by `tau` and by downstream crates like `hyper`, `tower`, `kube-runtime`) resolves to a single copy during plugin compilation, so there are no duplicate `Stream` trait conflicts.
+
+> **🔍 Research before implementing:**
+> - Run `cargo tree -p <plugin> -i futures-core` to see how many copies resolve. Should be exactly 1.
+> - Read about Cargo version resolution: https://doc.rust-lang.org/cargo/reference/resolver.html — semver-compatible versions (0.3.x) unify to one copy. If tau pins `futures-core = "0.3.30"` and hyper wants `"0.3.28"`, Cargo picks the latest compatible (`0.3.30`). No conflict.
+> - Key risk: if someone depends on `futures-core = "0.4"` (doesn't exist yet, but hypothetically) that would be a separate copy with a different `Stream` trait. Not a real concern today.
+> - Verification: compile a plugin that depends on `reqwest` (which pulls in `hyper` → `futures-core`) and also uses `tau::stream::Stream`. The `Stream` trait from both must be the same type.
 
 **Acceptance Criteria:**
 - [ ] Verify that when a plugin depends on both `tau` (via `--extern`) and a crate that pulls in `futures-core` (e.g., `reqwest`, `kube`), Cargo resolves to one `futures-core` version
@@ -460,6 +578,15 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 **Description:** As a plugin developer, I want a safe `AsyncFd` type that wraps a raw file descriptor and provides async readability/writability polling through the tau reactor, so I don't have to manually juggle `FfiWaker` and raw FFI calls.
 
+> **🔍 Research before implementing:**
+> - Read tokio `AsyncFd`: https://docs.rs/tokio/latest/tokio/io/unix/struct.AsyncFd.html — wraps a `RawFd`, provides `readable()` / `writable()` returning `AsyncFdReadyGuard` that must be used to clear readiness. Note the guard-based API: `let guard = fd.readable().await?; guard.try_io(|inner| inner.read(buf))`. We may simplify this since we're single-threaded.
+> - Read tokio `AsyncFd` source: https://github.com/tokio-rs/tokio/blob/master/tokio/src/io/async_fd.rs — how it registers with the reactor, stores interest, handles edge-triggered vs level-triggered readiness
+> - Read our existing IO FFI: `crates/tau-rt/src/io.rs` — `tau_io_register`, `tau_io_poll_ready`, `tau_io_clear_ready`, `tau_io_deregister`, `FfiWaker` struct
+> - Read old tau fork's `AsyncFd`: `~/tau/crates/tau-io/src/async_fd.rs` — simpler than tokio's, uses `FfiWaker` directly
+> - Read `crates/tau-tokio/src/net/mod.rs` — see how `TcpStream` currently manually does the register/poll_ready/clear_ready dance. `AsyncFd` should encapsulate this.
+> - Key: our `AsyncFd` is simpler than tokio's — no guard, no edge-triggered concerns (the `polling` crate handles re-arming). Just `poll_read_ready(cx) -> Poll<()>` and `clear_read_ready()`.
+> - Key: `AsyncFd` does NOT own the fd. Caller opens/closes the fd. `AsyncFd::drop` only deregisters from reactor.
+
 **Acceptance Criteria:**
 - [ ] Create `AsyncFd` struct in `crates/tau-rt/src/io.rs` (extend existing file):
   - `AsyncFd::new(fd: RawFd) -> io::Result<Self>` — registers fd for READABLE|WRITABLE with the reactor
@@ -485,6 +612,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 **Description:** As a developer, I want a single `make_ffi_waker(cx)` utility so the duplicated waker-boxing pattern in tau-tokio/net is eliminated. This utility lives in `tau-rt` and is used by `AsyncFd`, the tokio shim, and the crossterm vendor.
 
+> **🔍 Research before implementing:**
+> - Read `crates/tau-tokio/src/net/mod.rs` — search for `make_ffi_waker` or the waker boxing pattern (clone waker → box → FfiWaker). Count how many copies exist.
+> - Read `crates/tau-rt/src/io.rs` — the `FfiWaker` struct definition: `{ data: *mut (), wake_fn: Option<extern "C" fn(*mut ())> }`
+> - Read `std::task::Waker` docs: https://doc.rust-lang.org/std/task/struct.Waker.html — `clone()`, `wake()`, `wake_by_ref()`. We need `clone()` to take ownership, then `Box::into_raw` to get a `*mut ()`.
+> - Key: the `wake_fn` must call `Box::from_raw` to reclaim the `Waker`, then call `waker.wake()`. This frees the box. If the reactor replaces a stored `FfiWaker` with a new one (on re-poll), the old waker's box leaks unless the reactor explicitly drops it. Check `crates/tau-host/src/runtime/reactor.rs` to see if it drops replaced wakers.
+
 **Acceptance Criteria:**
 - [ ] Add `pub fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker` to `crates/tau-rt/src/io.rs`
   - Clones the waker from `cx`, boxes it, returns `FfiWaker { data, wake_fn }`
@@ -499,6 +632,13 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-019: Vendor crossterm — initial fork with features trimmed [ ]
 
 **Description:** As a developer, I want a vendored copy of crossterm 0.28 in the workspace with mio-related features removed, so we can replace the event system with tau's reactor.
+
+> **🔍 Research before implementing:**
+> - Read crossterm Cargo.toml (upstream): https://github.com/crossterm-rs/crossterm/blob/master/Cargo.toml — understand the feature graph: `events` pulls in `mio` + `signal-hook` + `signal-hook-mio`, `event-stream` adds `futures-core` + `async-trait` (or tokio)
+> - Read our old vendor fork: `~/tau/vendor/crossterm/Cargo.toml` — see what was already changed
+> - Read `crossterm/src/lib.rs` — what modules are `cfg`-gated behind features
+> - Key: crossterm's non-event functionality (cursor, style, terminal control, execute/queue macros) has ZERO dependency on mio. Only `src/event/` touches mio. So stripping mio only affects the event system.
+> - Key: the `event-stream` feature in upstream crossterm depends on `tokio`. Our fork replaces that with `tau` + `futures-core`.
 
 **Acceptance Criteria:**
 - [ ] Copy crossterm 0.28 source to `vendor/crossterm/` (from crates.io or the old tau fork at `~/tau/vendor/crossterm/`)
@@ -521,6 +661,14 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 **Description:** As a crossterm user, I want `crossterm::event::poll()` and `crossterm::event::read()` to work using tau's reactor instead of mio, so sync terminal event reading works without mio.
 
+> **🔍 Research before implementing:**
+> - Read existing mio event source: `~/tau/vendor/crossterm/src/event/source/unix/mio.rs` (already read above) — the `UnixInternalEventSource` pattern: registers tty + signals with mio `Poll`, reads bytes in a loop, parses via `Parser`
+> - Read crossterm `EventSource` trait: search for `trait EventSource` in `~/tau/vendor/crossterm/src/event/source/` — `try_read(&mut self, timeout) -> io::Result<Option<InternalEvent>>` and optionally `waker()`
+> - Read crossterm's `poll()` and `read()` public API: `~/tau/vendor/crossterm/src/event/read.rs` or `mod.rs` — they create an `InternalEventReader` that calls `EventSource::try_read` in a loop
+> - Read crossterm's SIGWINCH handling in the mio source — it uses `signal-hook-mio` `Signals` struct. Our replacement uses a self-pipe: `pipe()` → signal handler writes a byte → read end registered with reactor.
+> - Key: the sync source needs to actually block. Since we can't use `mio::Poll` anymore, options: (1) use `polling::Poller` directly, (2) use `tau_block_on` with an async wrapper. Option 1 is simpler — create a `polling::Poller`, register the tty fd and sigwinch pipe, call `poller.wait(events, timeout)`.
+> - Read `polling` crate docs: https://docs.rs/polling/latest/polling/ — `Poller::new()`, `unsafe Poller::add(fd, Event, PollMode)`, `Poller::wait(&self, events, timeout)`
+
 **Acceptance Criteria:**
 - [ ] Create `vendor/crossterm/src/event/source/unix/tau.rs` replacing `mio.rs`:
   - `UnixInternalEventSource` struct holds: reactor handle for tty fd, reactor handle for SIGWINCH self-pipe read end, Parser, tty FileDesc, read buffer
@@ -539,6 +687,14 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-021: Implement async `EventStream` using `AsyncFd` [ ]
 
 **Description:** As a plugin developer, I want `crossterm::event::EventStream` to implement `futures_core::Stream` using `AsyncFd` for tty and SIGWINCH polling, so I can await terminal events in async code.
+
+> **🔍 Research before implementing:**
+> - Read old tau fork's stream.rs: `~/tau/vendor/crossterm/src/event/stream.rs` — already implements `Stream for EventStream` using `tau-io::AsyncFd`. This is our direct reference.
+> - Read upstream crossterm's stream.rs: https://github.com/crossterm-rs/crossterm/blob/master/src/event/stream.rs — uses `tokio::io::unix::AsyncFd` for the tokio backend, or `async-std` equivalent. Note the pattern: wake up on any IO, try_read, if WouldBlock re-register.
+> - Read `futures_core::Stream` trait (above) — `poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>>`
+> - Key: `EventStream::poll_next` must check BOTH the sigwinch pipe and the tty. If either is readable, attempt to read. If SIGWINCH pipe has data, drain it and emit `Event::Resize`. If tty has data, read bytes and parse. If neither is ready, register wakers for both via `AsyncFd::poll_read_ready(cx)`.
+> - Key: if the parser has buffered events from a previous read (multi-byte escape sequences can produce multiple events from one read), return them immediately without polling fds.
+> - Key subtlety: `poll_read_ready` returns `Poll::Ready(())` when ready. After reading, call `clear_read_ready()` so the next poll re-checks. If the read got `WouldBlock`, clear readiness and return `Pending`.
 
 **Acceptance Criteria:**
 - [ ] Create `vendor/crossterm/src/event/stream.rs` (replaces the old mio/tokio-based stream):
@@ -559,6 +715,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 ### US-022: Crossterm integration test — sync and async events [ ]
 
 **Description:** As a developer, I want a test plugin that proves crossterm's sync and async event APIs work through the tau reactor.
+
+> **🔍 Research before implementing:**
+> - Read existing test plugins `plugins/example-plugin/`, `plugins/second-plugin/` for the pattern
+> - Read crossterm's public API: https://docs.rs/crossterm/latest/crossterm/ — `terminal::enable_raw_mode()`, `terminal::disable_raw_mode()`, `terminal::size()`, `event::poll(Duration)`, `event::read()`, `event::EventStream`
+> - Read how `patches.list` works: the plugin's `Cargo.toml` depends on `crossterm = "0.28"`, the compiler injects `--config 'patch.crates-io.crossterm.path=...'` pointing to our vendor fork
+> - Key: the test doesn't need to verify every key event — just that (1) the plugin compiles, (2) `terminal::size()` returns a valid result, (3) `EventStream` can be created without panicking, (4) the reactor correctly wakes on stdin readability
 
 **Acceptance Criteria:**
 - [ ] Create `plugins/crossterm-test-plugin/` that depends on `crossterm = { version = "0.28", features = ["event-stream"] }`
