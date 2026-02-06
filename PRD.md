@@ -30,6 +30,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 - Add `AsyncFd` to `tau-rt` as the safe wrapper for the IO reactor
 - Vendor crossterm with mio replaced by tau's reactor primitives, patched into plugins via `patches.list`
 - Support both sync (`crossterm::event::poll`/`read`) and async (`EventStream`) event APIs
+- Add `tokio::process` module to the tokio shim — `Command`, `Child`, async stdin/stdout/stderr backed by the tau reactor
 - Maintain all existing tokio shim compatibility — `reqwest`, `kube`, `tokio-util` must continue to compile and work
 - Restructure build cache: separate environment hash (compiler + flags + tau-rt) from plugin identity, enable dep-file fast path to skip cargo entirely when sources are unchanged
 - All changes pass `cargo build` for the workspace and `cargo xtask test`
@@ -576,7 +577,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-REVIEW-PHASE4: Review Tokio-Stream Shim (US-014 through US-016) [ ]
+### US-REVIEW-PHASE4: Review Tokio-Stream Shim (US-014 through US-016) [x]
 
 **Description:** Review US-014 through US-016 as a cohesive system.
 
@@ -808,9 +809,211 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
+### Phase 6: Process Shim
+
+---
+
+### US-023: Add `tokio::process` module to the tokio shim [ ]
+
+**Description:** As a plugin developer, I want `tokio::process::Command` so I can spawn child processes with async IO on their stdin/stdout/stderr, using the tau reactor instead of mio.
+
+Crates like `which`, build tools, and agent frameworks (spawning `git`, `cargo`, language servers, etc.) use `tokio::process`. The shim needs to provide `Command`, `Child`, `ChildStdin`, `ChildStdout`, and `ChildStderr` backed by the tau IO reactor.
+
+> **🔍 Research before implementing:**
+> - Read `crates/tau-tokio/src/net/mod.rs` — how `TcpStream` wraps raw fds with the tau IO reactor. `ChildStdout`/`ChildStderr` (AsyncRead) and `ChildStdin` (AsyncWrite) follow the same pattern: set fd non-blocking, register with reactor via `tau_io_register`, poll readiness, do non-blocking IO.
+> - Read `crates/tau-tokio/src/io/mod.rs` — existing `AsyncRead`/`AsyncWrite` trait definitions.
+> - Read tokio's process module: https://docs.rs/tokio/latest/tokio/process/ — our API must match the public surface.
+> - Read tokio's `Command` source: the async methods (`status()`, `output()`) are just convenience wrappers around `spawn()` + `child.wait()` / `child.wait_with_output()`.
+> - Key: `Command::spawn()` is **synchronous** — it calls `std::process::Command::spawn()` internally and wraps the result. The async part is waiting for exit and reading pipes.
+> - Key: child process waiting on macOS uses **SIGCHLD** — there's no pidfd. We need a SIGCHLD self-pipe (same pattern as crossterm's SIGWINCH in US-020/US-021) registered with the tau reactor. When SIGCHLD fires, all `Child::wait()` futures wake and call `try_wait()`.
+> - Key: `ChildStdin`/`ChildStdout`/`ChildStderr` are just non-blocking fds wrapped with `AsyncFd` (US-017). They implement `AsyncWrite`/`AsyncRead` respectively.
+> - Key: `kill_on_drop` is tokio-specific — when `Child` is dropped without waiting, send SIGKILL. We should support this.
+
+**Acceptance Criteria:**
+- [ ] Create `crates/tau-tokio/src/process/mod.rs`
+- [ ] `Command` struct wrapping `std::process::Command` with:
+  - All builder methods delegating to inner (`arg`, `args`, `env`, `envs`, `env_remove`, `env_clear`, `current_dir`, `stdin`, `stdout`, `stderr`)
+  - `kill_on_drop(&mut self, kill: bool) -> &mut Command`
+  - `spawn(&mut self) -> io::Result<Child>` — calls `std::process::Command::spawn()`, sets pipe fds to non-blocking, registers with reactor
+  - `status(&mut self) -> impl Future<Output = io::Result<ExitStatus>>` — spawns + waits
+  - `output(&mut self) -> impl Future<Output = io::Result<Output>>` — spawns + reads all pipes + waits
+  - Unix-specific: `uid`, `gid`, `process_group`, `pre_exec`
+- [ ] `Child` struct with:
+  - `pub stdin: Option<ChildStdin>`, `pub stdout: Option<ChildStdout>`, `pub stderr: Option<ChildStderr>`
+  - `id() -> Option<u32>`
+  - `start_kill(&mut self) -> io::Result<()>` — sends SIGKILL, does not wait
+  - `kill(&mut self) -> io::Result<()>` — async, sends SIGKILL then awaits exit
+  - `wait(&mut self) -> io::Result<ExitStatus>` — async, uses SIGCHLD self-pipe + `try_wait()` loop
+  - `try_wait(&mut self) -> io::Result<Option<ExitStatus>>`
+  - `wait_with_output(self) -> io::Result<Output>` — async, reads all pipes concurrently + waits
+  - `Drop` sends SIGKILL if `kill_on_drop` was set
+- [ ] `ChildStdin` implementing `AsyncWrite` — non-blocking fd registered with tau reactor via `AsyncFd`
+- [ ] `ChildStdout` implementing `AsyncRead` — non-blocking fd registered with tau reactor via `AsyncFd`
+- [ ] `ChildStderr` implementing `AsyncRead` — non-blocking fd registered with tau reactor via `AsyncFd`
+- [ ] SIGCHLD handling: self-pipe pattern — `pipe()` → signal handler writes byte → read end registered with reactor → `Child::wait()` polls readiness on the SIGCHLD pipe, then calls `try_wait()`
+- [ ] Add `pub mod process;` to `crates/tau-tokio/src/lib.rs`
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-024: Process shim integration test [ ]
+
+**Description:** As a developer, I want a test proving the process shim works end-to-end.
+
+**Acceptance Criteria:**
+- [ ] Create a test plugin (or extend an existing one) that:
+  - Spawns `echo "hello"` via `tokio::process::Command`, reads stdout, verifies output
+  - Spawns a long-running process (`sleep 10`), calls `child.kill()`, verifies it exits
+  - Spawns a process with piped stdin/stdout, writes to stdin, reads from stdout (e.g., `cat`)
+  - Tests `kill_on_drop`: spawns a process, drops the `Child`, verifies the process is killed
+  - Tests `Command::output()` convenience method
+- [ ] All sub-tests pass
+- [ ] `cargo build` succeeds for the workspace
+
+---
+
+### US-REVIEW-PHASE6: Review Process Shim (US-023 through US-024) [ ]
+
+**Description:** Review US-023 through US-024 as a cohesive system.
+
+**Acceptance Criteria:**
+- [ ] Review all phase code files together
+- [ ] Cross-task analysis:
+  - Verify SIGCHLD self-pipe is shared (one pipe for all children, not one per child)
+  - Verify `try_wait()` is called after SIGCHLD wakeup (SIGCHLD is coalesced — one signal may represent multiple exits)
+  - Verify pipe fds are set non-blocking and registered with the tau reactor correctly
+  - Verify `wait()` closes stdin before waiting (prevents deadlock where child blocks on writing to full stdout while parent blocks on child exit)
+  - Verify `kill_on_drop` sends SIGKILL in `Drop` impl (cannot await in Drop — just send signal, accept potential zombie until next SIGCHLD reap)
+  - Verify no fd leaks: all pipe fds are closed on `Child` drop, SIGCHLD pipe is process-global singleton
+- [ ] If issues found: insert fix tasks
+- [ ] If no issues: mark review passed
+
+---
+
+### Phase 7: TUI Framework
+
+> **Reference: existing tau-tui implementation**
+>
+> The old `~/tau/crates/tau-tui/` (6233 lines) provides a line-based TUI framework with:
+> - `Component` trait — `render(&self, width: u16) -> Vec<String>`, `handle_input(&mut self, &KeyEvent)`, `invalidate(&mut self)`
+> - `Container` — vertical stacking of `Box<dyn Component>` children
+> - `Terminal` trait — abstraction over crossterm (`CrosstermTerminal`) and testing (`MockTerminal`)
+> - `TUI<E>` engine — differential rendering (only redraws changed lines), overlay stack with focus save/restore, event loop bridging crossterm events + user-defined events via `mpsc::Sender<E>`
+> - Components: `Input` (line editor with cursor, history, multiline), `Text` (styled text with word wrap), `BoxComponent` (bordered container), `SelectList` (scrollable selection), `Spacer`
+> - `utils.rs` — ANSI-aware `visible_width()`, `truncate_to_width()`, `slice_from_column()` for correct rendering with escape codes
+>
+> Key design: components render to `Vec<String>` (lines with ANSI codes). The TUI engine diffs previous vs current lines and only rewrites changed ones. This is simpler than a cell-based approach (ratatui) but works well for line-oriented output (chat, logs, code).
+>
+> The port to tau-core is straightforward — the TUI code is runtime-independent except for crossterm usage (which we're already vendoring in Phase 5).
+
+---
+
+### US-025: Port TUI core — `Component`, `Container`, `Terminal` traits [ ]
+
+**Description:** As a plugin developer, I want the TUI component system available in tau-core so I can build terminal interfaces.
+
+> **🔍 Research before implementing:**
+> - Read `~/tau/crates/tau-tui/src/component.rs` — `Component` trait, `Container` struct. Clean, well-tested (242 lines).
+> - Read `~/tau/crates/tau-tui/src/terminal.rs` — `Terminal` trait, `CrosstermTerminal`, `MockTerminal`. Clean abstraction (251 lines).
+> - Read `~/tau/crates/tau-tui/src/utils.rs` — ANSI-aware string utilities (857 lines). These are load-bearing for correct rendering.
+> - Key: the TUI code has zero runtime dependency — it uses `crossterm` for terminal control and `std::sync::mpsc` for events. No tokio, no tau-rt FFI. It compiles as a normal rlib into plugins.
+> - Key: `CrosstermTerminal` depends on `crossterm` which we vendor (Phase 5, `patches.list`). The TUI crate should depend on `crossterm = "0.28"` and the patch system handles the rest.
+
+**Acceptance Criteria:**
+- [ ] Create `crates/tau-tui/` as a new workspace member (rlib, NOT in `patches.list` — it's a regular dependency plugins opt into)
+- [ ] Port `component.rs` — `Component` trait, `Container` struct
+- [ ] Port `terminal.rs` — `Terminal` trait, `CrosstermTerminal`, `MockTerminal`
+- [ ] Port `utils.rs` — `visible_width()`, `truncate_to_width()`, `slice_from_column()` and related ANSI string utilities
+- [ ] All existing tests from `~/tau/crates/tau-tui/` pass
+- [ ] `cargo build` succeeds for the workspace
+- [ ] `cargo test -p tau-tui` passes
+
+---
+
+### US-026: Port TUI engine — `TUI<E>` with differential rendering and event loop [ ]
+
+**Description:** As a plugin developer, I want the TUI engine that handles differential rendering, focus management, overlays, and the event loop.
+
+> **🔍 Research before implementing:**
+> - Read `~/tau/crates/tau-tui/src/tui.rs` (1943 lines) — the main engine. Key features:
+>   - `render()` — renders component tree to lines, diffs against `previous_lines`, writes only changed lines to terminal
+>   - `run()` — event loop: polls crossterm events + user events via `mpsc`, dispatches to focused component or handler callback
+>   - Overlay stack — `show_overlay()` / `hide_overlay()`, with focus save/restore
+>   - Scroll management — tracks `cursor_row` vs `hardware_cursor_row` for correct scrolling
+> - Key: the event loop currently uses `crossterm::event::poll()` + `crossterm::event::read()` (sync API). In tau-core, this can stay sync (Phase 5's US-020 makes sync crossterm work) or migrate to async `EventStream` (US-021). Start with sync — it's simpler and already works.
+> - Key: the `TUI<E>` is generic over a user event type `E`. The `event_tx()` returns `mpsc::Sender<E>` which spawned tasks use to push events back to the UI thread. This pattern works as-is in tau-core.
+
+**Acceptance Criteria:**
+- [ ] Port `tui.rs` — `TUI<E>` struct with `new()`, `start()`, `stop()`, `render()`, `run()`, `quit()`
+- [ ] Differential rendering works: only changed lines are rewritten
+- [ ] Focus management: `set_focus()`, `focused()`, key input dispatched to focused component
+- [ ] Overlay stack: `show_overlay()`, `hide_overlay()`, `has_overlay()`, `OverlayHandle`
+- [ ] Event loop: bridges crossterm events + user events, calls handler callback
+- [ ] All existing TUI engine tests from `~/tau/crates/tau-tui/` pass
+- [ ] `cargo test -p tau-tui` passes
+
+---
+
+### US-027: Port built-in components — `Input`, `Text`, `BoxComponent`, `SelectList`, `Spacer` [ ]
+
+**Description:** As a plugin developer, I want the standard component library for building terminal UIs.
+
+> **🔍 Research before implementing:**
+> - Read `~/tau/crates/tau-tui/src/components/` — each component file:
+>   - `input.rs` (786 lines) — line editor with cursor movement, insert/delete, history (up/down), multiline support, prompt, ANSI-aware cursor positioning
+>   - `text.rs` (270 lines) — styled text display with word wrapping
+>   - `box_component.rs` (288 lines) — bordered container (single/double/round borders), title, wraps a child component
+>   - `select_list.rs` (605 lines) — scrollable list with selection, search/filter, customizable rendering
+>   - `spacer.rs` (81 lines) — empty vertical space
+> - Key: `Input` is the most complex — it's a full line editor. Test it thoroughly.
+
+**Acceptance Criteria:**
+- [ ] Port all 5 components to `crates/tau-tui/src/components/`
+- [ ] All existing component tests pass
+- [ ] `Input`: cursor movement (left/right/home/end), insert, delete, backspace, history, multiline
+- [ ] `Text`: word wrapping at terminal width, styled content
+- [ ] `BoxComponent`: borders render correctly, child is inset
+- [ ] `SelectList`: scrolling, selection, search/filter
+- [ ] `Spacer`: renders N blank lines
+- [ ] `cargo test -p tau-tui` passes
+
+---
+
+### US-028: TUI integration test — plugin with interactive terminal UI [ ]
+
+**Description:** As a developer, I want a test plugin that proves the TUI framework works end-to-end in a plugin context with the vendored crossterm.
+
+**Acceptance Criteria:**
+- [ ] Create `plugins/tui-test-plugin/` that depends on `tau-tui` and `crossterm = "0.28"`
+- [ ] Plugin creates a `TUI` with an `Input` and `Text` component, runs the event loop
+- [ ] Plugin compiles via `./dist/run.sh --plugin plugins/tui-test-plugin`
+- [ ] Verify `MockTerminal`-based tests work within the plugin (no real terminal needed)
+- [ ] `cargo build` succeeds for the workspace
+
+---
+
+### US-REVIEW-PHASE7: Review TUI Framework (US-025 through US-028) [ ]
+
+**Description:** Review US-025 through US-028 as a cohesive system.
+
+**Acceptance Criteria:**
+- [ ] Review all ported code against the original `~/tau/crates/tau-tui/`
+- [ ] Verify no unnecessary changes — the port should be as close to the original as possible
+- [ ] Cross-task analysis:
+  - Verify `CrosstermTerminal` uses the vendored crossterm (resolved via `patches.list`)
+  - Verify the differential rendering engine correctly handles terminal resize events
+  - Verify overlay focus save/restore works with nested overlays
+  - Verify `Input` component handles wide characters (CJK) and ANSI escape codes correctly (relies on `utils.rs`)
+  - Verify `MockTerminal` captures all output for test assertions
+- [ ] If issues found: insert fix tasks
+- [ ] If no issues: mark review passed
+
+---
+
 ## Non-Goals
 
-- **TUI framework** — tau-tui component system, layout engine, differential rendering are a separate PRD built on top of the crossterm shim
+- **TUI redesign** — the Phase 7 port is a direct copy of the existing `~/tau/crates/tau-tui/` design. A future redesign (cell-based rendering, layout constraints, etc.) is out of scope.
 - **Conversation tree / session model** — out of scope, will be a separate `tau-agent` / `taugent` crate later
 - **Agent loop orchestration** — out of scope, built on top of these primitives later
 - **Tool schema registry** — out of scope, depends on a redesigned plugin interface

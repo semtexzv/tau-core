@@ -492,3 +492,77 @@
   - Compile-time trait equality assertions (`fn _check<T: TraitA + TraitB>() {}`) are the best way to prove two traits are the same — fails at compile time if they're different
 ---
 ## Task self-review PASSED
+
+## Iteration 4 - US-016: End-to-end compatibility test with ecosystem crates
+- What was done:
+  - Verified `cargo build` succeeds (1 warning, pre-existing)
+  - Verified `cargo test --workspace` passes (70 tests: 63 tau + 7 tau-host)
+  - Verified `cargo xtask test` passes (12/12 abort integration tests)
+  - Verified all 5 plugins compile and load via dist:
+    - example-plugin: runs, 10 requests
+    - stream-test-plugin (tokio-plugin equivalent): tokio-stream compiles against tau-tokio shim
+    - http-plugin: reqwest + futures-core unified
+    - kube-plugin: kube with runtime feature, futures-core unified
+    - abort-test-plugin: abort tests pass
+  - Added `_prove_watcher_compiles()` async function to kube-plugin:
+    - Uses `kube::runtime::watcher::watcher()` to create a watcher stream
+    - Proves the stream implements `tau::stream::Stream` via compile-time constraint
+    - Function is never called (no cluster needed) — purely a compilation test
+- Files changed:
+  - `plugins/kube-plugin/src/lib.rs` — added watcher() compile-time proof
+  - `PRD.md` — marked US-016 acceptance criteria and header complete
+- Learnings for future iterations:
+  - The "tokio-plugin" in the PRD refers to stream-test-plugin (which tests tokio-stream compatibility)
+  - Compile-time proof functions (`async fn _prove_...`) are a clean pattern for verifying API compatibility without runtime dependencies
+  - kube-runtime's watcher() returns `impl Stream` which is the same `futures_core::Stream` as `tau::stream::Stream`
+---
+## Task self-review PASSED
+
+## Iteration 5 - US-REVIEW-PHASE4: Review Tokio-Stream Shim (US-014 through US-016)
+- What was done: Code review of all tokio-stream/futures-core compatibility work
+- Files reviewed:
+  - `crates/tau-tokio/src/sync/mpsc.rs` — added len/is_empty/is_closed/capacity/max_capacity methods
+  - `crates/tau-tokio/src/sync/watch.rs` — added `pub mod error` re-export
+  - `crates/tau-tokio/src/time/mod.rs` — Instant newtype with into_std/from_std + operator impls
+  - `plugins/stream-test-plugin/src/lib.rs` — tokio-stream compatibility test
+  - `plugins/http-plugin/src/lib.rs` — reqwest/futures-core unification test
+  - `plugins/kube-plugin/src/lib.rs` — kube/futures-core unification test + watcher compile proof
+  - `patches.list` — only tau and tokio patched (no tokio-stream shim needed)
+
+### Per-task evaluation
+
+**US-014 (tokio-stream compiles against tau-tokio):** ✅ Clean approach — uses REAL tokio-stream compiled against patched tokio (tau-tokio), not a separate shim. Added 8 trivial methods to mpsc Receiver/UnboundedReceiver (len, is_empty, is_closed, capacity, max_capacity). Added `watch::error` sub-module for WatchStream. Feature compatibility table is thorough.
+
+**US-015 (futures-core single resolution):** ✅ Created http-plugin (reqwest → hyper → futures-core) and kube-plugin (kube → kube-runtime → futures-core). Both have compile-time assertions proving `tau::stream::Stream == futures_core::Stream`. Added Instant newtype to tau-tokio (into_std/from_std required by kube-runtime). Complete operator coverage.
+
+**US-016 (end-to-end compatibility):** ✅ Added `_prove_watcher_compiles()` to kube-plugin as compile-time proof that kube::runtime::watcher produces streams compatible with tau::stream::Stream. All plugins compile and load via dist.
+
+### Cross-task analysis
+
+1. **No tokio-stream shim (correct decision):** Review criteria mentioned "tokio-stream shim version (0.1.99)" but US-014's description explicitly says "no separate shim crate needed." The real tokio-stream compiling against patched tokio is simpler and correct.
+
+2. **ReceiverStream bridge:** ✅ `poll_recv` method on Receiver<T> is the key API tokio-stream's ReceiverStream calls. Present and correct.
+
+3. **Patch injection:** ✅ Only `tokio` patch needed in patches.list. tokio-stream depends on tokio, so the patch transitively applies.
+
+4. **futures-core single version:** ✅ Compile-time trait equality assertions in both http-plugin and kube-plugin prove one copy. Progress notes confirm one rlib in build cache.
+
+5. **Instant newtype completeness:** ✅ Covers: now, from_std, into_std, saturating_duration_since, duration_since, elapsed, checked_add, checked_sub, Add/Sub Duration, Sub Instant, AddAssign, SubAssign, From conversions. All needed by ecosystem crates.
+
+### Quality assessment
+- **Simplicity:** Excellent. New mpsc methods are trivial one-liners. Instant newtype is a thin delegation wrapper. No unnecessary abstractions.
+- **Correctness:** All acceptance criteria met. Compile-time proofs are sound.
+- **Edge cases:** Handled through design — methods delegate to inner types.
+- **Data structures:** Appropriate. No new data structures introduced.
+- **Naming:** Consistent with real tokio API surface.
+- **Duplication:** Minor inherent duplication between Receiver/UnboundedReceiver methods — acceptable (they're different types).
+
+### Pre-existing observation (not a fix task, not in scope)
+- Bounded mpsc `Sender::send` doesn't enforce capacity limits — `capacity()` reports remaining space but `push_back()` always succeeds. This is a pre-existing design choice, not introduced by US-014-016.
+
+## Phase 4 review PASSED
+- Learnings for future iterations:
+  - Real ecosystem crates (tokio-stream, reqwest, kube) compiling against the tau-tokio shim is the ultimate compatibility test — no separate shim needed
+  - Compile-time trait equality assertions (`fn _check<T: TraitA + TraitB>() {}`) are the gold standard for proving no duplicate trait definitions
+  - Missing API surface gaps are discovered organically by compiling real crates — the stream-test-plugin found 8 missing methods, kube-plugin found missing Instant::into_std
+---
