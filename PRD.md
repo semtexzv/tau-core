@@ -162,7 +162,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-REVIEW-PHASE1: Review Task Abort (US-001 through US-004) [ ]
+### US-REVIEW-PHASE1: Review Task Abort (US-001 through US-004) [x]
 
 **Description:** Review US-001 through US-004 as a cohesive system.
 

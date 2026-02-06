@@ -57,7 +57,7 @@
 ---
 ## Task self-review PASSED
 
-## Iteration 2 - US-REVIEW-PHASE1: Review Task Abort (US-001 through US-004)
+## Iteration 2 - US-REVIEW-PHASE1 (first pass): Review Task Abort (US-001 through US-004)
 - What was done: Code review of all abort-related changes across 4 user stories
 - Files reviewed:
   - `crates/tau-host/src/runtime/executor.rs` — Task struct, abort_task(), take_completed(), prepare_drive()
@@ -68,38 +68,61 @@
   - `plugins/abort-test-plugin/src/lib.rs` — test plugin
   - `tests/test-abort.sh`, `tests/test-abort.txt` — integration test
 
-### Per-task evaluation
-
-**US-001 (FFI abort):** ✅ Clean implementation. `abort_task()` correctly sets both `aborted` and `completed` flags, removes from ready_queue, cleans timers. Future drop is deferred to `take_completed()` — safe for self-abort. No issues.
-
-**US-002 (tau crate wiring):** ✅ Elegant design. `JoinHandle<T>` output is `Option<T>` (Some=success, None=abort). `WrapperFuture::drop` correctly detects still-Running stage and transitions to Aborted, wakes JoinHandle. Ref-counting via `TaskCell` is correct — no double-free possible.
-
-**US-003 (tokio shim):** ✅ Clean delegation. `AbortHandle` stores real `task_id`. `JoinSet::abort_all/shutdown/join_next` all work correctly with mixed completed/aborted tasks. `JoinSet::Drop` aborts all tasks (matches tokio semantics).
-
-**US-004 (integration test):** ✅ Covers key scenarios: abort idle task, abort completed task, Drop verification. Test structure with `drive` commands is sound.
-
-### Cross-task analysis
-
-1. **Double-free safety:** ✅ Verified. `tasks.remove()` in `take_completed()` returns each task exactly once. Even if abort + poll-completion race within the same drive cycle, the task is only removed once.
-
-2. **Self-abort (re-entrancy):** ✅ Safe. If task A aborts itself mid-poll, `abort_task()` uses `rt.borrow_mut()` which succeeds because `prepare_drive()` drops its borrow before polling. The future is dropped at cycle end via `take_completed()`.
-
-3. **plugin_task_count / drop_plugin_tasks:** ✅ Correct interaction with abort. Aborted tasks (completed=true) are correctly removed. Timer cleanup in `take_plugin_tasks` is harmless redundancy for already-cleaned aborted tasks.
-
-4. **JoinSet::join_next with mixed results:** ✅ Iterates all handles, polls each. Both `Ok(val)` and `Err(JoinError)` results are correctly propagated. O(n) per poll but acceptable for expected set sizes.
-
-5. **❌ Cross-thread abort (spawn_blocking):** FAILS. `AbortHandle::abort()` calls `tau_task_abort` which uses thread-local `RUNTIME`. From background threads, this silently does nothing. Since `AbortHandle` is `Send + Sync`, users expect it to work from any thread. Fix: add global `ABORT_QUEUE` (same pattern as `WAKE_QUEUE`). **Created fix task US-004a.**
-
-### Quality assessment
-- **Simplicity:** Good. The abort flow is straightforward: flag → cleanup → drop. No unnecessary abstractions.
-- **Data structures:** Appropriate. Task HashMap, VecDeque ready_queue, BTreeMap timers — all correct for the problem.
-- **Error handling:** Consistent. Abort of non-existent/completed tasks returns false (no panic).
-- **Naming:** Clear and consistent across all layers (abort_task, tau_task_abort, JoinHandle::abort, AbortHandle::abort).
-- **No duplication:** The abort FFI declaration appears in both tau-rt and tau-tokio (AbortHandle has its own `extern "C"` block), but this is expected since tau-tokio doesn't depend on tau-rt directly.
-
-### Verdict: REVIEW BLOCKED — 1 fix task required (US-004a)
+### Verdict: REVIEW BLOCKED — 1 fix task required (US-004a: cross-thread abort)
 - Learnings for future iterations:
   - Thread-local RUNTIME means ALL FFI functions that modify runtime state only work on the main thread. Any new FFI that needs cross-thread safety must use global queues (WAKE_QUEUE pattern).
   - The borrow discipline (extract → drop borrow → poll → re-borrow) is well-established and correct. Future changes should follow this pattern.
   - WrapperFuture::drop is the bridge between host abort (drops the erased future) and plugin-side TaskCell state (Stage::Aborted). This is load-bearing code.
+---
+
+## Iteration 3 - US-REVIEW-PHASE1 (second pass): Review Task Abort (US-001 through US-004a)
+- What was done: Re-review after US-004a fix (cross-thread abort via ABORT_QUEUE)
+- Files reviewed (all source files in abort scope):
+  - `crates/tau-host/src/runtime/executor.rs` — ABORT_QUEUE, queue_abort(), prepare_drive() drain
+  - `crates/tau-host/src/runtime/mod.rs` — tau_task_abort now calls queue_abort()
+  - `crates/tau-rt/src/runtime.rs` — Stage::Aborted, WrapperFuture::drop, JoinHandle, TaskCell
+  - `crates/tau-rt/src/types.rs` — FfiWaker::into_waker()
+  - `crates/tau-tokio/src/lib.rs` — tokio shim JoinHandle, JoinError
+  - `crates/tau-tokio/src/task/mod.rs` — AbortHandle, JoinSet, JoinNextFuture
+  - `plugins/abort-test-plugin/src/lib.rs` — test plugin with cross-thread test
+  - `tests/test-abort.sh`, `tests/test-abort.txt` — integration tests
+
+### Per-task evaluation
+
+**US-001 (FFI abort):** ✅ Clean. `abort_task()` sets aborted+completed, removes from ready_queue, cleans timers. Drop deferred to `take_completed()`.
+
+**US-002 (tau crate wiring):** ✅ Elegant. `JoinHandle<T>` output is `Option<T>` (Some=success, None=abort). `WrapperFuture::drop` detects Running → Aborted transition, wakes JoinHandle. TaskCell ref-counting correct.
+
+**US-003 (tokio shim):** ✅ Clean delegation. `AbortHandle` stores real `task_id`. `JoinSet::abort_all/shutdown/join_next` handle mixed completed/aborted results. `JoinSet::Drop` aborts all (matches tokio).
+
+**US-004 (integration test):** ✅ Covers: abort idle task, abort completed task (no-op), Drop verification, cross-thread abort.
+
+**US-004a (cross-thread abort):** ✅ ABORT_QUEUE pattern matches WAKE_QUEUE exactly. `queue_abort()` pushes + `try_notify_reactor()`. `prepare_drive()` drains. Always returns 1. Clean and consistent.
+
+### Cross-task analysis (all 5 required checks)
+
+1. **Abort during active polling / double-free:** ✅ SAFE. `tau_task_abort` queues to ABORT_QUEUE. Processed in NEXT `prepare_drive()`. During poll phase, the task is never simultaneously aborted+polled. `tasks.remove()` in `take_completed()` returns each task exactly once.
+
+2. **Abort from spawn_blocking (cross-thread):** ✅ WORKS. ABORT_QUEUE is `OnceLock<Mutex<VecDeque<u64>>>` — thread-safe. `try_notify_reactor()` wakes the reactor from any thread. Test verified in abort-test-plugin "cross-thread-abort" command.
+
+3. **plugin_task_count / drop_plugin_tasks:** ✅ CORRECT. `take_plugin_tasks` removes all tasks for a plugin (including aborted ones with completed=true). If aborts are pending in ABORT_QUEUE for already-removed tasks, `abort_task` returns false (task not found) — harmless no-op.
+
+4. **Re-entrancy (aborting from within poll):** ✅ SAFE. `tau_task_abort` doesn't borrow RUNTIME at all — it pushes to a global Mutex queue. No RefCell involved. The abort is processed on the next drive cycle, after all polls complete.
+
+5. **JoinSet::join_next with mixed results:** ✅ CORRECT. Tokio shim `JoinHandle::poll` maps `Some(val)→Ok(val)`, `None→Err(JoinError{cancelled:true})`. `JoinNextFuture` iterates with `swap_remove`. Both completed and aborted handles are handled uniformly.
+
+### Quality assessment
+- **Simplicity:** Excellent. Abort flow is straightforward: queue → drain → flag → cleanup → drop → notify JoinHandle. No unnecessary abstractions.
+- **Correctness:** All acceptance criteria met. Abort is idempotent. Self-abort safe. Cross-thread safe.
+- **Edge cases:** Handled through design (queue-based processing) not if/else patches.
+- **Data structures:** ABORT_QUEUE mirrors WAKE_QUEUE — consistent pattern. Task HashMap, VecDeque, BTreeMap all appropriate.
+- **Error handling:** Consistent. Abort of non-existent/completed tasks is a no-op.
+- **Naming:** Clear and consistent across all layers.
+- **Duplication:** Minor: `ffi_waker_to_std` in `tau-rt/src/runtime.rs` duplicates `FfiWaker::into_waker()` in `tau-rt/src/types.rs`. Pre-existing (not introduced by abort tasks). Will be addressed by US-018 (make_ffi_waker utility).
+
+## Phase 1 review PASSED
+- Learnings for future iterations:
+  - The queue-based abort (ABORT_QUEUE) is strictly better than direct RUNTIME access — simpler, thread-safe, no special cases for self-abort vs cross-thread abort.
+  - Two-level "completed" tracking: `Task.completed` (executor-side bool) vs `TaskCell.complete` (plugin-side AtomicBool) — different lifecycles, both correct. Task.completed controls executor scheduling; TaskCell.complete controls JoinHandle result availability.
+  - `WrapperFuture::drop` is the critical bridge: host drops the erased future → plugin-side TaskCell transitions to Stage::Aborted → JoinHandle waker notified.
 ---
