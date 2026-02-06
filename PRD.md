@@ -799,7 +799,7 @@ Also fix `wake_by_ref`: it currently calls `wake_fn(data)` which does `Box::from
 
 ---
 
-### US-REVIEW-PHASE5: Review AsyncFd & Crossterm (US-017 through US-022) [ ]
+### US-REVIEW-PHASE5: Review AsyncFd & Crossterm (US-017 through US-022) [x]
 
 **Description:** Review US-017 through US-022 as a cohesive system.
 

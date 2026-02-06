@@ -763,3 +763,54 @@ AsyncFd is clean and well-structured. `with_interest` for flexible registration,
   - When repurposing an FFI type for new ownership semantics, the Drop/clone story must be updated throughout.
   - The reactor stores `std::task::Waker` (converted from FfiWaker via into_waker), not FfiWaker directly. This extra indirection is where the leak lives.
 ---
+
+## Iteration 13 - US-018a: Fix FfiWaker memory leak
+- What was done:
+  - Added `clone_fn` and `drop_fn` optional function pointer fields to `FfiWaker` struct
+  - Updated `into_waker()` vtable: drop calls `drop_fn`, clone calls `clone_fn`, wake_by_ref clones then wakes
+  - Updated `make_ffi_waker()` to provide `clone_fn` (clones inner Box<Waker>) and `drop_fn` (frees inner Box<Waker>)
+  - Updated executor's task-ID FfiWaker to explicitly set `clone_fn: None, drop_fn: None`
+  - Eliminated duplicate `ffi_waker_to_std` — now delegates to `FfiWaker::into_waker()`
+  - Removed unused `RawWaker`/`RawWakerVTable` imports from runtime.rs
+  - All 160 tests pass
+- Files changed:
+  - `crates/tau-rt/src/types.rs` — FfiWaker struct + into_waker vtable
+  - `crates/tau-rt/src/io.rs` — make_ffi_waker with clone_fn/drop_fn
+  - `crates/tau-rt/src/runtime.rs` — simplified ffi_waker_to_std, removed unused imports
+  - `crates/tau-host/src/runtime/executor.rs` — explicit None fields in task-ID waker
+  - `PRD.md` — marked US-018a complete
+- Learnings for future iterations:
+  - The ownership split (clone_fn/drop_fn = None for non-owned, Some for owned) elegantly handles both FfiWaker use cases without runtime branches
+  - wake_by_ref for owned data must clone-then-wake to avoid consuming the shared allocation
+  - ffi_waker_to_std was a 1:1 duplicate of into_waker — eliminated the duplication
+---
+## Task self-review PASSED
+
+## Iteration 14 - US-REVIEW-PHASE5: Review AsyncFd & Crossterm (US-017 through US-022)
+- What was done: Re-reviewed all Phase 5 code after US-018a fix
+- Files reviewed:
+  - `crates/tau-rt/src/types.rs` — FfiWaker with clone_fn/drop_fn (fixed)
+  - `crates/tau-rt/src/io.rs` — make_ffi_waker, AsyncFd
+  - `crates/tau-rt/src/runtime.rs` — ffi_waker_to_std delegates to into_waker
+  - `crates/tau-host/src/runtime/mod.rs` — tau_io_poll_ready FFI
+  - `crates/tau-host/src/runtime/reactor.rs` — Reactor poll_ready/wake
+  - `vendor/crossterm/src/event/stream.rs` — async EventStream
+  - `vendor/crossterm/src/event/source/unix/tau.rs` — sync event source
+
+### Verification Results
+- FfiWaker lifecycle (make_ffi_waker → into_waker → reactor store/wake/drop): No leaks, no double-frees ✅
+- EventStream dual-fd waker registration: Correct — both fds polled, wakers registered ✅
+- SIGWINCH self-pipe cleanup on drop: Signal restored, pipe closed, reactor deregistered ✅
+- Sync poll/read uses raw rustix::event::poll(), no reactor lock contention ✅
+- Crossterm patches.list integration: Confirmed working ✅
+- make_ffi_waker double-free check: FfiWaker is Copy with no Drop — caller's stack copy with dangling data pointer is never dereferenced ✅
+
+### Note: Minor code duplication
+Parser, nonblocking_pipe, drain_pipe, read_complete, io_err are duplicated between tau.rs and stream.rs. These are in separate feature-gated compilation units. Acceptable for vendored code.
+
+## Phase 5 review PASSED
+- Learnings for future iterations:
+  - FfiWaker ownership split (clone_fn/drop_fn = None vs Some) cleanly handles both task-ID and heap-pointer use cases
+  - FfiWaker being Copy means callers can't accidentally double-free — only the vtable manages the inner allocation
+  - Level-triggered polling with re-arm in reactor.poll() keeps fd registration simple
+---
