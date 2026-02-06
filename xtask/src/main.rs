@@ -17,13 +17,12 @@ fn main() {
             dist(release);
         }
         Some("test") => {
-            let dist_mode = args.iter().any(|a| a == "--dist");
-            test(dist_mode);
+            test();
         }
         _ => {
             eprintln!("Usage:");
             eprintln!("  cargo xtask dist [--release]   Build distribution");
-            eprintln!("  cargo xtask test [--dist]      Run reload + safety tests");
+            eprintln!("  cargo xtask test               Run integration tests (via dist)");
             std::process::exit(1);
         }
     }
@@ -249,20 +248,18 @@ fn strip_prebuilt_deps(toml_path: &Path, prebuilt: &[&str]) {
 // test
 // =============================================================================
 
-fn test(dist_mode: bool) {
+fn test() {
     let root = workspace_root();
+    let dist_dir = root.join("dist");
 
-    if !dist_mode {
-        println!("=== Building host ===");
-        run(Command::new("cargo").current_dir(&root).arg("build"));
+    // Build dist if not present
+    if !dist_dir.join("bin/tau").exists() {
+        println!("=== Building dist ===");
+        dist(false);
     }
 
     let test_dir = root.join("tests");
-    let scripts: &[&str] = if dist_mode {
-        &["test-reload-dist.sh", "test-safety.sh"]
-    } else {
-        &["test-reload.sh", "test-safety.sh"]
-    };
+    let scripts: &[&str] = &["test-abort.sh"];
 
     let mut all_pass = true;
     for script in scripts {

@@ -11,8 +11,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DIST="$ROOT/dist"
+TAU="$DIST/run.sh"
 
 cd "$ROOT"
+
+# Build dist if not present or if --rebuild passed
+if [ ! -f "$DIST/bin/tau" ] || [[ "${1:-}" == "--rebuild" ]]; then
+    echo "=== Building dist ==="
+    cargo xtask dist
+fi
 
 PASS=0
 FAIL=0
@@ -20,16 +28,13 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 
-echo "=== Building host ==="
-cargo build 2>/dev/null
-
 echo
 echo "=========================================="
 echo " Task Abort Integration Tests"
 echo "=========================================="
 echo
 
-OUTPUT=$(cargo run -- test < "$SCRIPT_DIR/test-abort.txt" 2>&1)
+OUTPUT=$("$TAU" test < "$SCRIPT_DIR/test-abort.txt" 2>&1)
 
 echo "$OUTPUT"
 echo

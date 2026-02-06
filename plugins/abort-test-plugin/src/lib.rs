@@ -7,7 +7,15 @@
 //!   "spawn-and-complete" — spawn a task that completes immediately, store task_id
 //!   "abort-completed" — abort the already-completed task (should be a no-op)
 
+use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Deserialize)]
+struct Message {
+    #[allow(dead_code)]
+    id: u64,
+    payload: String,
+}
 
 /// Tracks whether the spawned future's Drop ran.
 static DROP_RAN: AtomicBool = AtomicBool::new(false);
@@ -37,7 +45,8 @@ tau::define_plugin! {
     }
 
     fn request(data: &[u8]) -> u64 {
-        let cmd = std::str::from_utf8(data).unwrap_or("<invalid>");
+        let msg: Message = serde_json::from_slice(data).expect("invalid JSON from host");
+        let cmd = msg.payload.as_str();
         println!("[abort-test] Command: {}", cmd);
 
         match cmd {
