@@ -387,7 +387,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-REVIEW-PHASE3: Review Stream Combinators (US-009 through US-013) [ ]
+### US-REVIEW-PHASE3: Review Stream Combinators (US-009 through US-013) [x]
 
 **Description:** Review US-009 through US-013 as a cohesive system.
 

@@ -361,3 +361,46 @@
   - Combinator chaining tests verify composability across different combinator types
 ## Task self-review PASSED
 ---
+
+## Iteration 9 - US-REVIEW-PHASE3: Review Stream Combinators (US-009 through US-013)
+- What was done: Code review of all stream combinator and consumer implementations
+- Files reviewed:
+  - `crates/tau/src/stream/mod.rs` — StreamExt trait with 10 methods, blanket impl
+  - `crates/tau/src/stream/combinators.rs` — Map, Filter, FilterMap, TakeWhile, Merge, Then + 5 merge tests
+  - `crates/tau/src/stream/consumers.rs` — Next, Collect, ForEach, Fold
+  - `crates/tau/src/stream/tests.rs` — 38 comprehensive tests
+
+### Per-task evaluation
+
+**US-009 (sync combinators: map, filter, filter_map, take_while):** ✅ Clean canonical implementations. Pin projections via `pin_project_lite` — sound by construction. Filter/FilterMap loop correctly. TakeWhile `done` flag is permanent. size_hint correct everywhere.
+
+**US-010 (async combinator: then):** ✅ Two-state machine (pending future vs poll source). Immediately polls newly created future to avoid unnecessary yield. Inner future dropped cleanly when Then is dropped (pin_project handles it). size_hint adds +1 when future in-flight.
+
+**US-011 (consumers: next, collect, for_each, fold):** ✅ Clean separation into consumers.rs (futures, not streams). Next borrows (&mut St, requires Unpin). Collect/ForEach/Fold loop to exhaustion. Fold uses Option<B> pattern for ownership transfer through FnMut — elegant.
+
+**US-012 (merge):** ✅ Fairness via `poll_a_first` toggle. `poll_stream` helper keeps code DRY. Both-done check correct. size_hint sums both streams with saturating arithmetic.
+
+**US-013 (tests):** ✅ 38 tests covering all combinators + 4 chaining tests. Good coverage of edge cases (empty streams, all-pass, all-fail, type changes).
+
+### Cross-task analysis (5 required checks)
+
+1. **Pin projection safety:** ✅ All 9 structs use `pin_project_lite::pin_project!`. No manual `get_unchecked_mut` anywhere.
+
+2. **Then inner future dropped mid-execution:** ✅ `pin_project!` generates proper Drop. Option<Fut> is dropped cleanly — no dangling state.
+
+3. **Merge fairness:** ✅ `poll_a_first` alternates each call. Neither side starves. Test verifies [1,2,1,2,1,2] alternation.
+
+4. **None (stream termination) propagation:** ✅ All combinators forward Ready(None). TakeWhile sets done→true then None. Merge needs both done. Consumers loop until None.
+
+5. **StreamExt naming conflicts with futures::StreamExt:** ✅ Method names match ecosystem conventions exactly. If both traits in scope, Rust's standard disambiguation applies — not a bug.
+
+### Minor observation (not a fix task)
+- Test helpers (VecStream, noop_waker, collect_sync) duplicated between combinators.rs tests and tests.rs — both are #[cfg(test)] in separate modules. Acceptable for test code; not worth a fix task.
+
+## Phase 3 review PASSED
+- Learnings for future iterations:
+  - pin_project_lite provides sound pin projections with zero boilerplate — correct tool choice
+  - The sync/async combinator split (FnMut vs FnMut→Fut) is clean and mirrors futures-util
+  - consumers.rs (futures) vs combinators.rs (streams) is a good organizational pattern
+  - Merge's poll_stream helper is reusable for future N-way merge if needed
+---
