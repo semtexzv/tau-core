@@ -5,7 +5,103 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 pub use std::time::Duration;
-pub use std::time::Instant;
+
+/// A measurement of a monotonically nondecreasing clock.
+///
+/// This is a thin wrapper around [`std::time::Instant`] that provides
+/// the `into_std()` / `from_std()` methods expected by the tokio ecosystem.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Instant(std::time::Instant);
+
+impl Instant {
+    /// Returns an instant corresponding to "now".
+    pub fn now() -> Self {
+        Self(std::time::Instant::now())
+    }
+
+    /// Convert from a `std::time::Instant`.
+    pub fn from_std(std_instant: std::time::Instant) -> Self {
+        Self(std_instant)
+    }
+
+    /// Convert into a `std::time::Instant`.
+    pub fn into_std(self) -> std::time::Instant {
+        self.0
+    }
+
+    /// Returns the amount of time elapsed from another instant to this one,
+    /// or zero if that instant is later.
+    pub fn saturating_duration_since(&self, earlier: Instant) -> Duration {
+        self.0.saturating_duration_since(earlier.0)
+    }
+
+    /// Returns the amount of time elapsed from another instant to this one.
+    pub fn duration_since(&self, earlier: Instant) -> Duration {
+        self.0.duration_since(earlier.0)
+    }
+
+    /// Returns the amount of time elapsed since this instant was created.
+    pub fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+
+    /// Returns `Some(t)` where `t` is `self + duration` if it can be represented,
+    /// `None` otherwise.
+    pub fn checked_add(&self, duration: Duration) -> Option<Instant> {
+        self.0.checked_add(duration).map(Instant)
+    }
+
+    /// Returns `Some(t)` where `t` is `self - duration` if it can be represented,
+    /// `None` otherwise.
+    pub fn checked_sub(&self, duration: Duration) -> Option<Instant> {
+        self.0.checked_sub(duration).map(Instant)
+    }
+}
+
+impl std::ops::Add<Duration> for Instant {
+    type Output = Instant;
+    fn add(self, rhs: Duration) -> Instant {
+        Instant(self.0 + rhs)
+    }
+}
+
+impl std::ops::AddAssign<Duration> for Instant {
+    fn add_assign(&mut self, rhs: Duration) {
+        self.0 += rhs;
+    }
+}
+
+impl std::ops::Sub<Duration> for Instant {
+    type Output = Instant;
+    fn sub(self, rhs: Duration) -> Instant {
+        Instant(self.0 - rhs)
+    }
+}
+
+impl std::ops::SubAssign<Duration> for Instant {
+    fn sub_assign(&mut self, rhs: Duration) {
+        self.0 -= rhs;
+    }
+}
+
+impl std::ops::Sub<Instant> for Instant {
+    type Output = Duration;
+    fn sub(self, rhs: Instant) -> Duration {
+        self.0 - rhs.0
+    }
+}
+
+impl From<std::time::Instant> for Instant {
+    fn from(std_instant: std::time::Instant) -> Self {
+        Self(std_instant)
+    }
+}
+
+impl From<Instant> for std::time::Instant {
+    fn from(instant: Instant) -> Self {
+        instant.0
+    }
+}
 
 /// Creates a future that completes after `duration`.
 pub fn sleep(duration: Duration) -> Sleep {

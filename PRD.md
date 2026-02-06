@@ -542,7 +542,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-015: Verify `futures-core` resolves correctly in plugin builds [ ]
+### US-015: Verify `futures-core` resolves correctly in plugin builds [x]
 
 **Description:** As a developer, I want to verify that `futures-core` (used by `tau` and by downstream crates like `hyper`, `tower`, `kube-runtime`) resolves to a single copy during plugin compilation, so there are no duplicate `Stream` trait conflicts.
 
@@ -553,12 +553,12 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Verification: compile a plugin that depends on `reqwest` (which pulls in `hyper` → `futures-core`) and also uses `tau::stream::Stream`. The `Stream` trait from both must be the same type.
 
 **Acceptance Criteria:**
-- [ ] Verify that when a plugin depends on both `tau` (via `--extern`) and a crate that pulls in `futures-core` (e.g., `reqwest`, `kube`), Cargo resolves to one `futures-core` version
-- [ ] If there's a version conflict (tau pins `futures-core 0.3.x`, downstream wants `0.3.y`): relax the version bound in `tau/Cargo.toml` to `"0.3"`
-- [ ] `http-plugin` (reqwest) still compiles and loads
-- [ ] `kube-plugin` still compiles and loads
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Verify that when a plugin depends on both `tau` (via `--extern`) and a crate that pulls in `futures-core` (e.g., `reqwest`, `kube`), Cargo resolves to one `futures-core` version
+- [x] If there's a version conflict (tau pins `futures-core 0.3.x`, downstream wants `0.3.y`): relax the version bound in `tau/Cargo.toml` to `"0.3"`
+- [x] `http-plugin` (reqwest) still compiles and loads
+- [x] `kube-plugin` still compiles and loads
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 
