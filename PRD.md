@@ -347,7 +347,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-012: `merge` — combine two streams into one [ ]
+### US-012: `merge` — combine two streams into one [x]
 
 **Description:** As a plugin developer, I want to merge multiple streams so I can process items from different sources in arrival order.
 
@@ -358,12 +358,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key: the fairness toggle prevents starvation: poll A first on even calls, B first on odd calls (or vice versa).
 
 **Acceptance Criteria:**
-- [ ] Add `fn merge<S2>(self, other: S2) -> Merge<Self, S2>` to `StreamExt` where `S2: Stream<Item = Self::Item>`
-- [ ] `Merge` polls both inner streams fairly (alternate which is polled first to avoid starvation)
-- [ ] Yields items from whichever stream is ready
-- [ ] Completes only when both streams are exhausted
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Add `fn merge<S2>(self, other: S2) -> Merge<Self, S2>` to `StreamExt` where `S2: Stream<Item = Self::Item>`
+- [x] `Merge` polls both inner streams fairly (alternate which is polled first to avoid starvation)
+- [x] Yields items from whichever stream is ready
+- [x] Completes only when both streams are exhausted
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

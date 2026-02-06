@@ -304,3 +304,23 @@
   - `size_hint` accounts for in-flight future (+1 when pending is Some)
 ---
 ## Task self-review PASSED
+
+## Iteration 6 - US-011: Utility combinators — next, collect, for_each, fold
+- What was done:
+  - Created `crates/tau/src/stream/consumers.rs` with 4 future structs: Next, Collect, ForEach, Fold
+  - Next borrows `&mut St` (requires Unpin), polls stream once per poll
+  - Collect/ForEach/Fold take ownership, loop polling until stream exhausted
+  - Fold uses `Option<B>` for accumulator to allow ownership transfer through FnMut
+  - Added `pub mod consumers` to stream/mod.rs, re-exported all types
+  - Added 4 methods to StreamExt trait
+  - Build succeeds, all tests pass
+- Files changed:
+  - `crates/tau/src/stream/consumers.rs` — new file
+  - `crates/tau/src/stream/mod.rs` — added consumers module, StreamExt methods
+  - `PRD.md` — marked US-011 complete
+- Learnings for future iterations:
+  - Terminal consumers are futures (not streams) — separate file from combinators is clean separation
+  - Fold's accumulator uses Option<B> pattern to move ownership through FnMut without unsafe
+  - Collect uses `core::mem::take` to move the Default-able collection out on completion
+---
+## Task self-review PASSED

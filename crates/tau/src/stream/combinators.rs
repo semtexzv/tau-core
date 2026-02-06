@@ -222,6 +222,114 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Merge
+// ---------------------------------------------------------------------------
+
+pin_project! {
+    /// Stream adapter that interleaves items from two streams.
+    ///
+    /// Polls both inner streams fairly by alternating which is polled first.
+    /// Completes only when **both** streams are exhausted.
+    ///
+    /// Created by [`StreamExt::merge`](super::StreamExt::merge).
+    #[must_use = "streams do nothing unless polled"]
+    pub struct Merge<A, B> {
+        #[pin]
+        a: A,
+        a_done: bool,
+        #[pin]
+        b: B,
+        b_done: bool,
+        // Toggled each poll for fairness: true means poll a first.
+        poll_a_first: bool,
+    }
+}
+
+impl<A, B> Merge<A, B> {
+    pub(super) fn new(a: A, b: B) -> Self {
+        Self {
+            a,
+            a_done: false,
+            b,
+            b_done: false,
+            poll_a_first: true,
+        }
+    }
+}
+
+impl<A, B> Stream for Merge<A, B>
+where
+    A: Stream,
+    B: Stream<Item = A::Item>,
+{
+    type Item = A::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<A::Item>> {
+        let mut this = self.project();
+
+        // Alternate which stream gets polled first for fairness.
+        let poll_a_first = *this.poll_a_first;
+        *this.poll_a_first = !poll_a_first;
+
+        if poll_a_first {
+            // Try A first, then B.
+            if let Some(item) = poll_stream(this.a.as_mut(), this.a_done, cx) {
+                return Poll::Ready(Some(item));
+            }
+            if let Some(item) = poll_stream(this.b.as_mut(), this.b_done, cx) {
+                return Poll::Ready(Some(item));
+            }
+        } else {
+            // Try B first, then A.
+            if let Some(item) = poll_stream(this.b.as_mut(), this.b_done, cx) {
+                return Poll::Ready(Some(item));
+            }
+            if let Some(item) = poll_stream(this.a.as_mut(), this.a_done, cx) {
+                return Poll::Ready(Some(item));
+            }
+        }
+
+        // Neither stream produced an item.
+        if *this.a_done && *this.b_done {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (a_lo, a_hi) = self.a.size_hint();
+        let (b_lo, b_hi) = self.b.size_hint();
+        let lo = a_lo.saturating_add(b_lo);
+        let hi = match (a_hi, b_hi) {
+            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+            _ => None,
+        };
+        (lo, hi)
+    }
+}
+
+/// Helper: poll a single stream, updating its `done` flag.
+/// Returns `Some(item)` if an item was produced, `None` otherwise.
+fn poll_stream<St: Stream>(
+    stream: Pin<&mut St>,
+    done: &mut bool,
+    cx: &mut Context<'_>,
+) -> Option<St::Item> {
+    if *done {
+        return None;
+    }
+    match stream.poll_next(cx) {
+        Poll::Ready(Some(item)) => Some(item),
+        Poll::Ready(None) => {
+            *done = true;
+            None
+        }
+        Poll::Pending => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Then (async map)
 // ---------------------------------------------------------------------------
 
@@ -299,5 +407,135 @@ where
         } else {
             hint
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::StreamExt;
+    use core::task::{RawWaker, RawWakerVTable, Waker};
+
+    // A simple stream that yields items from a vec.
+    struct VecStream<T> {
+        items: Vec<T>,
+        index: usize,
+    }
+
+    impl<T> VecStream<T> {
+        fn new(items: Vec<T>) -> Self {
+            Self { items, index: 0 }
+        }
+    }
+
+    impl<T: Unpin> Stream for VecStream<T> {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<T>> {
+            let this = self.get_mut();
+            if this.index < this.items.len() {
+                // Move the item out by swapping with a default... or use unsafe.
+                // Simpler: store Option<T> internally.
+                let item = unsafe {
+                    core::ptr::read(&this.items[this.index] as *const T)
+                };
+                this.index += 1;
+                Poll::Ready(Some(item))
+            } else {
+                Poll::Ready(None)
+            }
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = self.items.len() - self.index;
+            (remaining, Some(remaining))
+        }
+    }
+
+    // Don't drop the vec items normally since we moved them out via ptr::read
+    impl<T> Drop for VecStream<T> {
+        fn drop(&mut self) {
+            // Only drop items we haven't consumed
+            unsafe {
+                let ptr = self.items.as_mut_ptr().add(self.index);
+                let remaining = self.items.len() - self.index;
+                core::ptr::drop_in_place(core::slice::from_raw_parts_mut(ptr, remaining));
+                self.items.set_len(0); // prevent Vec from dropping already-moved items
+            }
+        }
+    }
+
+    fn noop_waker() -> Waker {
+        fn noop(_: *const ()) {}
+        fn clone(p: *const ()) -> RawWaker { RawWaker::new(p, &VTABLE) }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }
+    }
+
+    /// Poll a stream to completion synchronously (only works with ready streams).
+    fn collect_sync<S: Stream + Unpin>(mut stream: S) -> Vec<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+        loop {
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(item)) => items.push(item),
+                Poll::Ready(None) => break,
+                Poll::Pending => panic!("unexpected Pending in sync collect"),
+            }
+        }
+        items
+    }
+
+    #[test]
+    fn merge_both_streams() {
+        let a = VecStream::new(vec![1, 3, 5]);
+        let b = VecStream::new(vec![2, 4, 6]);
+        let merged = a.merge(b);
+        let items = collect_sync(merged);
+        // All 6 items must be present
+        assert_eq!(items.len(), 6);
+        let mut sorted = items.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn merge_one_empty() {
+        let a = VecStream::new(vec![10, 20]);
+        let b = VecStream::<i32>::new(vec![]);
+        let items = collect_sync(a.merge(b));
+        assert_eq!(items.len(), 2);
+        assert!(items.contains(&10));
+        assert!(items.contains(&20));
+    }
+
+    #[test]
+    fn merge_both_empty() {
+        let a = VecStream::<i32>::new(vec![]);
+        let b = VecStream::<i32>::new(vec![]);
+        let items = collect_sync(a.merge(b));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn merge_fairness_alternates() {
+        // Both streams always ready, check that items alternate
+        let a = VecStream::new(vec![1, 1, 1]);
+        let b = VecStream::new(vec![2, 2, 2]);
+        let items = collect_sync(a.merge(b));
+        // First poll: a first (poll_a_first starts true) → yields 1
+        // Second poll: b first → yields 2
+        // Third poll: a first → yields 1
+        // ... etc
+        assert_eq!(items, vec![1, 2, 1, 2, 1, 2]);
+    }
+
+    #[test]
+    fn merge_size_hint() {
+        let a = VecStream::new(vec![1, 2, 3]);
+        let b = VecStream::new(vec![4, 5]);
+        let merged = a.merge(b);
+        assert_eq!(merged.size_hint(), (5, Some(5)));
     }
 }

@@ -13,7 +13,7 @@ pub mod combinators;
 pub mod consumers;
 
 pub use futures_core::Stream;
-pub use combinators::{Map, Filter, FilterMap, TakeWhile, Then};
+pub use combinators::{Map, Filter, FilterMap, TakeWhile, Then, Merge};
 pub use consumers::{Next, Collect, ForEach, Fold};
 
 /// Extension trait for [`Stream`] providing synchronous combinators.
@@ -66,6 +66,18 @@ pub trait StreamExt: Stream + Sized {
         Fut: core::future::Future,
     {
         Then::new(self, f)
+    }
+
+    /// Merges two streams into one, interleaving items in arrival order.
+    ///
+    /// Polls both streams fairly by alternating which is polled first.
+    /// The merged stream completes only when **both** inner streams are
+    /// exhausted.
+    fn merge<S2>(self, other: S2) -> Merge<Self, S2>
+    where
+        S2: Stream<Item = Self::Item>,
+    {
+        Merge::new(self, other)
     }
 
     /// Returns a future that yields the next item from the stream.
