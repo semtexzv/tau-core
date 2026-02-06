@@ -228,7 +228,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-006: `StreamHandle` — FFI-safe stream with push/poll/close [ ]
+### US-006: `StreamHandle` — FFI-safe stream with push/poll/close [x]
 
 **Description:** As a plugin developer, I want to create streams that work across the FFI boundary so plugins can produce data the host (or other plugins) consume.
 
@@ -240,23 +240,23 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key: this is NOT a typed channel (that's US-007). This is raw bytes across FFI. Think of it as `mpsc::channel<Vec<u8>>` but the storage is host-side and accessed via opaque handles.
 
 **Acceptance Criteria:**
-- [ ] Add FFI declarations to `crates/tau/src/stream.rs`:
+- [x] Add FFI declarations to `crates/tau/src/stream.rs`:
   - `tau_stream_create(capacity: u32) -> u64` — creates a bounded stream, returns handle
   - `tau_stream_push(handle: u64, data_ptr: *const u8, data_len: usize) -> u8` — push item (returns 0=ok, 1=full, 2=closed)
   - `tau_stream_poll_next(handle: u64, waker: FfiWaker, out_ptr: *mut *const u8, out_len: *mut usize) -> u8` — poll next (returns 0=pending, 1=ready, 2=done)
   - `tau_stream_close(handle: u64)` — signal no more items (sender side)
   - `tau_stream_drop(handle: u64)` — release handle (receiver side, cancels the stream)
-- [ ] Add host-side implementations in a new `crates/tau-host/src/runtime/streams.rs`:
+- [x] Add host-side implementations in a new `crates/tau-host/src/runtime/streams.rs`:
   - Internal `StreamState` struct with `VecDeque<Vec<u8>>`, capacity, sender/receiver wakers, closed flag
   - Global `HashMap<u64, StreamState>` behind `OnceLock<Mutex<...>>` (same pattern as events/resources)
   - Each FFI function accesses the map, manipulates state, wakes as needed
-- [ ] Wire exports in `crates/tau-host/src/runtime/mod.rs`
-- [ ] Plugin-side safe wrappers in `crates/tau/src/stream.rs`:
+- [x] Wire exports in `crates/tau-host/src/runtime/mod.rs`
+- [x] Plugin-side safe wrappers in `crates/tau/src/stream.rs`:
   - `StreamSender` — wraps handle, `push(&self, data: &[u8])`, `async send(&self, data: &[u8])` (waits if full), `close(self)`
   - `StreamReceiver` — wraps handle, implements `Stream<Item = Vec<u8>>` via `poll_next`, `Drop` calls `tau_stream_drop`
-- [ ] `pub fn channel(capacity: u32) -> (StreamSender, StreamReceiver)` constructor
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] `pub fn channel(capacity: u32) -> (StreamSender, StreamReceiver)` constructor
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

@@ -126,3 +126,20 @@
   - Two-level "completed" tracking: `Task.completed` (executor-side bool) vs `TaskCell.complete` (plugin-side AtomicBool) — different lifecycles, both correct. Task.completed controls executor scheduling; TaskCell.complete controls JoinHandle result availability.
   - `WrapperFuture::drop` is the critical bridge: host drops the erased future → plugin-side TaskCell transitions to Stage::Aborted → JoinHandle waker notified.
 ---
+
+## Iteration 2 - US-005: Re-export futures_core::Stream in the tau crate
+- What was done:
+  - Added `futures-core = "0.3"` to `crates/tau/Cargo.toml`
+  - Created `crates/tau/src/stream.rs` with `pub use futures_core::Stream;`
+  - Added `pub mod stream;` to `crates/tau/src/lib.rs`
+  - All 22 tests pass, build succeeds
+- Files changed:
+  - `crates/tau/Cargo.toml` — added futures-core dependency
+  - `crates/tau/src/stream.rs` — new file, re-exports Stream trait
+  - `crates/tau/src/lib.rs` — added pub mod stream
+  - `PRD.md` — marked US-005 acceptance criteria complete
+- Learnings for future iterations:
+  - `tau::stream::Stream` is now available for plugins — same trait as `futures_core::Stream`
+  - Future stream work (US-006+) will add FFI handles and combinators to this module
+---
+## Task self-review PASSED
