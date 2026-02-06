@@ -723,7 +723,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-021: Implement async `EventStream` using `AsyncFd` [ ]
+### US-021: Implement async `EventStream` using `AsyncFd` [x]
 
 **Description:** As a plugin developer, I want `crossterm::event::EventStream` to implement `futures_core::Stream` using `AsyncFd` for tty and SIGWINCH polling, so I can await terminal events in async code.
 
@@ -736,18 +736,18 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Key subtlety: `poll_read_ready` returns `Poll::Ready(())` when ready. After reading, call `clear_read_ready()` so the next poll re-checks. If the read got `WouldBlock`, clear readiness and return `Pending`.
 
 **Acceptance Criteria:**
-- [ ] Create `vendor/crossterm/src/event/stream.rs` (replaces the old mio/tokio-based stream):
+- [x] Create `vendor/crossterm/src/event/stream.rs` (replaces the old mio/tokio-based stream):
   - `EventStream` struct holds: `AsyncFd` for tty, `AsyncFd` for SIGWINCH pipe read end, Parser, tty FileDesc, read buffer, raw SIGWINCH pipe fd
   - Constructor: same setup as sync source (tty, self-pipe, signal handler) but using `tau::io::AsyncFd`
   - `EventStream::new() -> Self`
   - `EventStream::next(&mut self) -> Option<io::Result<Event>>` — convenience async method
-- [ ] Implement `Stream for EventStream`:
+- [x] Implement `Stream for EventStream`:
   - `poll_next`: check parser buffer → poll SIGWINCH `AsyncFd` for read → poll tty `AsyncFd` for read → parse bytes → return event or `Pending`
   - Wakers registered via `AsyncFd::poll_read_ready(cx)` — standard `Context`, no `async-ffi` / `FfiContext` needed
-- [ ] `Drop` cleans up: close self-pipe, restore SIGWINCH to SIG_DFL, AsyncFd deregisters from reactor
-- [ ] Gated behind `#[cfg(feature = "event-stream")]`
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] `Drop` cleans up: close self-pipe, restore SIGWINCH to SIG_DFL, AsyncFd deregisters from reactor
+- [x] Gated behind `#[cfg(feature = "event-stream")]`
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 
