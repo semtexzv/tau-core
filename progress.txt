@@ -450,3 +450,23 @@
   - parse_crate_name is a simple line-by-line search — works for all current plugins but wouldn't handle exotic Cargo.toml layouts
 ---
 ## Task self-review PASSED
+
+## Iteration 2 - US-COMP-002: Dep-file fast path — skip cargo when sources unchanged
+- What was done:
+  - Added `check_up_to_date()` method to `Compiler` that parses cargo dep files and checks mtimes
+  - Added `parse_dep_file()` for Makefile-format dep file parsing (handles escaped spaces, continuation lines)
+  - Wired fast path into `compile_plugin()` — calls `check_up_to_date()` before any cargo setup
+  - Also checks `Cargo.toml` mtime (catches dependency changes not listed in dep file)
+  - Added 5 unit tests for dep-file parser (simple, continuation, escaped spaces, empty, no colon)
+  - All 70 tests pass (63 tau + 7 tau-host), build succeeds
+  - Manual verification: both runs show "Plugin up-to-date (skipped)", second run 0.186s total
+- Files changed:
+  - `crates/tau-host/src/compiler.rs` — check_up_to_date(), parse_dep_file(), fast path in compile_plugin(), 5 tests
+  - `PRD.md` — marked US-COMP-002 acceptance criteria and header complete
+- Learnings for future iterations:
+  - Cargo dep files are at `target/<profile>/lib<crate>.d` in Makefile format: `<output>: <dep1> <dep2> ...`
+  - Dep files list all transitive source files (plugin + patched crates) but NOT dylib dependencies — those are handled by the environment hash
+  - The fast path gracefully degrades: any failure (missing files, parse errors, stat errors) falls through to cargo
+  - Escaped spaces in paths (`\ `) must be handled for paths with spaces
+---
+## Task self-review PASSED
