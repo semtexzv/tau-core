@@ -562,17 +562,17 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-016: End-to-end compatibility test with ecosystem crates [ ]
+### US-016: End-to-end compatibility test with ecosystem crates [x]
 
 **Description:** As a developer, I want to verify the stream shims don't break existing plugin compilation.
 
 **Acceptance Criteria:**
-- [ ] `cargo xtask test` passes (all existing plugins compile and tests pass)
-- [ ] `kube-plugin` compiles with `kube = { features = ["runtime"] }` which pulls in `kube-runtime` (uses streams internally)
-- [ ] `http-plugin` (reqwest) still compiles and runs
-- [ ] `tokio-plugin` still compiles and runs
-- [ ] If `kube-runtime` now uses our stream trait: verify a `watcher()` or `watch()` call compiles (even if it fails at runtime due to no cluster)
-- [ ] `cargo build` succeeds for the workspace
+- [x] `cargo xtask test` passes (all existing plugins compile and tests pass)
+- [x] `kube-plugin` compiles with `kube = { features = ["runtime"] }` which pulls in `kube-runtime` (uses streams internally)
+- [x] `http-plugin` (reqwest) still compiles and runs
+- [x] `tokio-plugin` still compiles and runs
+- [x] If `kube-runtime` now uses our stream trait: verify a `watcher()` or `watch()` call compiles (even if it fails at runtime due to no cluster)
+- [x] `cargo build` succeeds for the workspace
 
 ---
 

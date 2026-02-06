@@ -470,3 +470,25 @@
   - Escaped spaces in paths (`\ `) must be handled for paths with spaces
 ---
 ## Task self-review PASSED
+
+## Iteration 3 - US-015: Verify futures-core resolves correctly in plugin builds
+- What was done:
+  - Created `plugins/http-plugin/` — minimal plugin depending on `reqwest` (pulls in hyper → http-body → futures-core)
+  - Created `plugins/kube-plugin/` — minimal plugin depending on `kube` with runtime feature (pulls in kube-runtime → futures-core via many paths)
+  - Both plugins include compile-time assertions proving `tau::stream::Stream == futures_core::Stream` (same trait, not duplicates)
+  - Added `Instant` newtype wrapper to `crates/tau-tokio/src/time/mod.rs` with `into_std()`/`from_std()` methods — required by `kube-runtime`'s `backoff_reset_timer` module
+  - Verified: exactly ONE `futures-core` rlib (`e554339327a5ca28`) in build cache for both plugins
+  - `tau/Cargo.toml` already has `futures-core = "0.3"` (minimal semver bound) — no relaxation needed
+  - All 70 workspace tests pass, both plugins compile and load through dist
+- Files changed:
+  - `plugins/http-plugin/Cargo.toml`, `plugins/http-plugin/src/lib.rs` — new http-plugin
+  - `plugins/kube-plugin/Cargo.toml`, `plugins/kube-plugin/src/lib.rs` — new kube-plugin
+  - `crates/tau-tokio/src/time/mod.rs` — Instant newtype with into_std/from_std + operator impls
+  - `PRD.md` — marked US-015 acceptance criteria and header complete
+- Learnings for future iterations:
+  - Our tokio shim previously re-exported `std::time::Instant` directly. Real tokio wraps it in a newtype with `into_std()/from_std()`. Ecosystem crates (kube-runtime) depend on these methods.
+  - The Instant newtype needs full operator coverage: Add/Sub Duration, Sub Instant→Duration, AddAssign, SubAssign, From conversions
+  - `k8s-openapi` requires explicit version feature (`latest`) — version must match kube's expected k8s-openapi version
+  - Compile-time trait equality assertions (`fn _check<T: TraitA + TraitB>() {}`) are the best way to prove two traits are the same — fails at compile time if they're different
+---
+## Task self-review PASSED
