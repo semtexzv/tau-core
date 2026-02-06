@@ -214,17 +214,17 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-005: Re-export `futures_core::Stream` in the `tau` crate [ ]
+### US-005: Re-export `futures_core::Stream` in the `tau` crate [x]
 
 **Description:** As a plugin developer, I want a `Stream` trait available through the `tau` crate so I can produce and consume asynchronous sequences of values, using the standard `futures_core::Stream` trait that the ecosystem already depends on.
 
 **Acceptance Criteria:**
-- [ ] Add `futures-core = "0.3"` to `crates/tau/Cargo.toml` dependencies
-- [ ] Create `crates/tau/src/stream.rs`
-- [ ] Re-export the trait: `pub use futures_core::Stream;`
-- [ ] Add `pub mod stream;` to `crates/tau/src/lib.rs`
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Add `futures-core = "0.3"` to `crates/tau/Cargo.toml` dependencies
+- [x] Create `crates/tau/src/stream.rs`
+- [x] Re-export the trait: `pub use futures_core::Stream;`
+- [x] Add `pub mod stream;` to `crates/tau/src/lib.rs`
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

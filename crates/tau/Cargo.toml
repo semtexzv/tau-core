@@ -9,3 +9,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 tau-rt = { path = "../tau-rt" }
+futures-core = "0.3"

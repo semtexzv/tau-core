@@ -58,6 +58,9 @@ pub mod rt {
 /// as long as any trait object / function pointer from that plugin exists.
 pub mod guard;
 
+/// Async stream primitives — re-exports `futures_core::Stream`.
+pub mod stream;
+
 /// Plugin definition macro.
 mod plugin;
 
