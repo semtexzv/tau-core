@@ -613,7 +613,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-017: Add `AsyncFd` to `tau-rt` [ ]
+### US-017: Add `AsyncFd` to `tau-rt` [x]
 
 **Description:** As a plugin developer, I want a safe `AsyncFd` type that wraps a raw file descriptor and provides async readability/writability polling through the tau reactor, so I don't have to manually juggle `FfiWaker` and raw FFI calls.
 
@@ -627,7 +627,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Key: `AsyncFd` does NOT own the fd. Caller opens/closes the fd. `AsyncFd::drop` only deregisters from reactor.
 
 **Acceptance Criteria:**
-- [ ] Create `AsyncFd` struct in `crates/tau-rt/src/io.rs` (extend existing file):
+- [x] Create `AsyncFd` struct in `crates/tau-rt/src/io.rs` (extend existing file):
   - `AsyncFd::new(fd: RawFd) -> io::Result<Self>` — registers fd for READABLE|WRITABLE with the reactor
   - `AsyncFd::with_interest(fd: RawFd, interest: u8) -> io::Result<Self>` — registers with specific interest flags
   - `AsyncFd::poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>` — polls for readability using `tau_io_poll_ready` with a waker extracted from `cx`
@@ -639,11 +639,11 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
   - `Drop` calls `tau_io_deregister`
   - `AsyncFd::as_raw_fd(&self) -> RawFd`
   - `AsyncFd::handle(&self) -> u64` — returns the reactor handle
-- [ ] `AsyncFd` does NOT own the fd (caller manages fd lifetime)
-- [ ] Helper: `fn ffi_waker_from_cx(cx: &mut Context<'_>) -> FfiWaker` — converts a std Waker to FfiWaker (clone waker, box it, set wake_fn)
-- [ ] Re-export `AsyncFd` from `crates/tau-rt/src/lib.rs`
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] `AsyncFd` does NOT own the fd (caller manages fd lifetime)
+- [x] Helper: `fn ffi_waker_from_cx(cx: &mut Context<'_>) -> FfiWaker` — converts a std Waker to FfiWaker (clone waker, box it, set wake_fn)
+- [x] Re-export `AsyncFd` from `crates/tau-rt/src/lib.rs`
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

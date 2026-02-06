@@ -57,3 +57,144 @@ pub fn clear_ready(handle: u64, direction: u8) {
 pub fn deregister(handle: u64) {
     unsafe { tau_io_deregister(handle) }
 }
+
+// =============================================================================
+// ffi_waker_from_cx — convert std Context waker to FfiWaker
+// =============================================================================
+
+/// Convert a `Context`'s waker into an `FfiWaker` suitable for the reactor.
+///
+/// Clones the waker, boxes it, and returns an `FfiWaker` whose `wake_fn`
+/// unboxes and calls `waker.wake()`.
+pub fn ffi_waker_from_cx(cx: &std::task::Context<'_>) -> FfiWaker {
+    let waker = cx.waker().clone();
+    let data = Box::into_raw(Box::new(waker)) as *mut ();
+
+    extern "C" fn wake_fn(data: *mut ()) {
+        let waker = unsafe { Box::from_raw(data as *mut std::task::Waker) };
+        waker.wake();
+    }
+
+    FfiWaker {
+        data,
+        wake_fn: Some(wake_fn),
+    }
+}
+
+// =============================================================================
+// AsyncFd — safe async wrapper around a raw file descriptor
+// =============================================================================
+
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+/// A safe wrapper that registers a raw file descriptor with the tau IO reactor
+/// and provides async readability/writability polling.
+///
+/// `AsyncFd` does **not** own the file descriptor. The caller is responsible
+/// for opening and closing the fd. `Drop` only deregisters from the reactor.
+pub struct AsyncFd {
+    fd: RawFd,
+    handle: u64,
+}
+
+impl AsyncFd {
+    /// Register a file descriptor for both READABLE and WRITABLE interest.
+    pub fn new(fd: RawFd) -> std::io::Result<Self> {
+        Self::with_interest(fd, READABLE | WRITABLE)
+    }
+
+    /// Register a file descriptor with specific interest flags.
+    pub fn with_interest(fd: RawFd, interest: u8) -> std::io::Result<Self> {
+        let handle = register(fd, interest).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "failed to register fd with reactor")
+        })?;
+        Ok(Self { fd, handle })
+    }
+
+    /// Poll for read readiness.
+    ///
+    /// Returns `Poll::Ready(Ok(()))` if the fd is readable, or `Poll::Pending`
+    /// if not (the waker is stored by the reactor).
+    pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let waker = ffi_waker_from_cx(cx);
+        if poll_ready(self.handle, DIR_READ, waker) {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    /// Poll for write readiness.
+    pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let waker = ffi_waker_from_cx(cx);
+        if poll_ready(self.handle, DIR_WRITE, waker) {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    /// Clear read readiness. Call after getting `WouldBlock`.
+    pub fn clear_read_ready(&self) {
+        clear_ready(self.handle, DIR_READ);
+    }
+
+    /// Clear write readiness. Call after getting `WouldBlock`.
+    pub fn clear_write_ready(&self) {
+        clear_ready(self.handle, DIR_WRITE);
+    }
+
+    /// Async wait for readability.
+    pub fn readable(&self) -> ReadableFuture<'_> {
+        ReadableFuture { fd: self }
+    }
+
+    /// Async wait for writability.
+    pub fn writable(&self) -> WritableFuture<'_> {
+        WritableFuture { fd: self }
+    }
+
+    /// Returns the raw file descriptor (not owned).
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.fd
+    }
+
+    /// Returns the reactor handle for this registration.
+    pub fn handle(&self) -> u64 {
+        self.handle
+    }
+}
+
+impl Drop for AsyncFd {
+    fn drop(&mut self) {
+        deregister(self.handle);
+    }
+}
+
+/// Future returned by [`AsyncFd::readable`].
+pub struct ReadableFuture<'a> {
+    fd: &'a AsyncFd,
+}
+
+impl<'a> Future for ReadableFuture<'a> {
+    type Output = std::io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.fd.poll_read_ready(cx)
+    }
+}
+
+/// Future returned by [`AsyncFd::writable`].
+pub struct WritableFuture<'a> {
+    fd: &'a AsyncFd,
+}
+
+impl<'a> Future for WritableFuture<'a> {
+    type Output = std::io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.fd.poll_write_ready(cx)
+    }
+}
