@@ -1,10 +1,10 @@
 //! This module provides platform related functions.
 
 #[cfg(unix)]
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub use self::unix::position;
 #[cfg(windows)]
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub use self::windows::position;
 #[cfg(windows)]
 pub(crate) use self::windows::{
@@ -16,5 +16,5 @@ pub(crate) use self::windows::{
 pub(crate) mod windows;
 
 #[cfg(unix)]
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) mod unix;

@@ -182,7 +182,7 @@ fn set_terminal_attr(fd: impl AsFd, termios: &Termios) -> io::Result<()> {
 ///
 /// On unix systems, this function will block and possibly time out while
 /// [`crossterm::event::read`](crate::event::read) or [`crossterm::event::poll`](crate::event::poll) are being called.
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub fn supports_keyboard_enhancement() -> io::Result<bool> {
     if is_raw_mode_enabled() {
         read_supports_keyboard_enhancement_raw()
@@ -191,7 +191,7 @@ pub fn supports_keyboard_enhancement() -> io::Result<bool> {
     }
 }
 
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 fn read_supports_keyboard_enhancement_flags() -> io::Result<bool> {
     enable_raw_mode()?;
     let flags = read_supports_keyboard_enhancement_raw();
@@ -199,7 +199,7 @@ fn read_supports_keyboard_enhancement_flags() -> io::Result<bool> {
     flags
 }
 
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 fn read_supports_keyboard_enhancement_raw() -> io::Result<bool> {
     use crate::event::{
         filter::{KeyboardEnhancementFlagsFilter, PrimaryDeviceAttributesFilter},

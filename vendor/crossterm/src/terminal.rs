@@ -98,7 +98,7 @@ use crate::{csi, impl_display};
 
 pub(crate) mod sys;
 
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub use sys::supports_keyboard_enhancement;
 
 /// Tells whether the raw mode is enabled.

@@ -696,7 +696,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-020: Replace mio event source with tau reactor (sync poll/read) [ ]
+### US-020: Replace mio event source with tau reactor (sync poll/read) [x]
 
 **Description:** As a crossterm user, I want `crossterm::event::poll()` and `crossterm::event::read()` to work using tau's reactor instead of mio, so sync terminal event reading works without mio.
 
@@ -709,17 +709,17 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Read `polling` crate docs: https://docs.rs/polling/latest/polling/ — `Poller::new()`, `unsafe Poller::add(fd, Event, PollMode)`, `Poller::wait(&self, events, timeout)`
 
 **Acceptance Criteria:**
-- [ ] Create `vendor/crossterm/src/event/source/unix/tau.rs` replacing `mio.rs`:
+- [x] Create `vendor/crossterm/src/event/source/unix/tau.rs` replacing `mio.rs`:
   - `UnixInternalEventSource` struct holds: reactor handle for tty fd, reactor handle for SIGWINCH self-pipe read end, Parser, tty FileDesc, read buffer
   - Constructor: opens tty, sets non-blocking, registers with reactor via `tau::io::register()`. Creates SIGWINCH self-pipe, registers read end with reactor. Installs signal handler.
   - `try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>>`: uses `polling::Poller` (or `tau::block_on` / `tau::drive` with timeout) to wait for readiness on tty or sigwinch pipe, then reads and parses
-- [ ] Update `vendor/crossterm/src/event/source/unix.rs` to use `tau` module instead of `mio` module (the `cfg` dispatch)
-- [ ] Replace mio-based `Waker` in `vendor/crossterm/src/event/sys/unix/waker/` with a tau reactor notify-based implementation (calls `tau_reactor_notify`)
-- [ ] `crossterm::event::poll(Duration)` works — blocks up to timeout, returns `Ok(true)` if event available
-- [ ] `crossterm::event::read()` works — blocks until an event is available, returns it
-- [ ] SIGWINCH produces `Event::Resize` events
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Update `vendor/crossterm/src/event/source/unix.rs` to use `tau` module instead of `mio` module (the `cfg` dispatch)
+- [x] Replace mio-based `Waker` in `vendor/crossterm/src/event/sys/unix/waker/` with a tau reactor notify-based implementation (calls `tau_reactor_notify`)
+- [x] `crossterm::event::poll(Duration)` works — blocks up to timeout, returns `Ok(true)` if event available
+- [x] `crossterm::event::read()` works — blocks until an event is available, returns it
+- [x] SIGWINCH produces `Event::Resize` events
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

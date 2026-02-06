@@ -57,11 +57,15 @@ crossterm_winapi = { version = "0.9.1", optional = true }
 # UNIX dependencies
 #
 [target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.3" }
 libc = { version = "0.2", default-features = false, optional = true }
 rustix = { version = "0.38.34", default-features = false, features = [
     "std",
     "stdio",
     "termios",
+    "event",
+    "pipe",
+    "process",
 ] }
 filedescriptor = { version = "0.8", optional = true }
 

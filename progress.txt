@@ -604,3 +604,65 @@
   - PRD listed 5 copies but there were actually 6 (UnixStream was the extra one)
 ---
 ## Task self-review PASSED
+
+## Iteration 8 - US-019: Vendor crossterm — initial fork with features trimmed
+- What was done:
+  - Copied crossterm 0.28 from old tau fork (`~/tau/vendor/crossterm/`) to `vendor/crossterm/`
+  - Rewrote `vendor/crossterm/Cargo.toml`:
+    - Removed mio, signal-hook, signal-hook-mio from dependencies
+    - Removed `events` and `windows` features
+    - Changed default to `["bracketed-paste"]`
+    - Added `tau = { version = "0.1" }` dependency
+    - Changed `event-stream` to `["dep:futures-core"]`
+    - Removed old tau-io and async-ffi dependencies
+    - Added dev-dependencies (serde_json, serial_test, temp-env) for crossterm's own tests
+  - Removed `examples/` directory (examples require removed features)
+  - Added `crossterm = vendor/crossterm` to `patches.list`
+  - Added `vendor/crossterm` to workspace members in root `Cargo.toml`
+  - Added `[patch.crates-io] tau = { path = "crates/tau" }` to root Cargo.toml for workspace resolution
+  - All 131 tests pass (29 crossterm + 63 tau + 7 tau-host + 32 doc-tests)
+- Files changed:
+  - `vendor/crossterm/` — new vendored crate (entire directory)
+  - `vendor/crossterm/Cargo.toml` — rewritten with trimmed features
+  - `Cargo.toml` — added vendor/crossterm to members, added [patch.crates-io]
+  - `patches.list` — added crossterm entry
+  - `PRD.md` — marked US-019 acceptance criteria and header complete
+- Learnings for future iterations:
+  - The old tau fork at `~/tau/vendor/crossterm/` already had tau-io and async-ffi references in event/stream.rs — those are gated behind features and won't compile until US-020/US-021 rewrites the event system
+  - Workspace members need `[patch.crates-io]` in the root Cargo.toml for local crate resolution (unlike plugin builds which get patches injected by the compiler)
+  - crossterm's non-event code (cursor, style, terminal, macros) has zero dependency on mio — stripping mio only affects the event module
+  - dev-dependencies must be preserved for crossterm's own unit tests to compile
+## Task self-review PASSED
+---
+
+## Iteration 9 - US-020: Replace mio event source with tau reactor (sync poll/read)
+- What was done:
+  - Created `vendor/crossterm/src/event/source/unix/tau.rs` — new UnixInternalEventSource using rustix::event::poll + signal-hook self-pipe
+  - Created `vendor/crossterm/src/event/sys/unix/waker/tau.rs` — pipe-based Waker (writes byte to wake poll loop)
+  - Updated `vendor/crossterm/src/event/source/unix.rs` — dispatch to tau module (not mio) when `use-dev-tty` feature is off
+  - Updated `vendor/crossterm/src/event/sys/unix/waker.rs` — dispatch to tau Waker
+  - Updated `vendor/crossterm/src/event/sys/unix.rs` — removed `events` feature gate from waker and parse modules
+  - Updated `vendor/crossterm/src/event/sys.rs` — removed `events` from combined cfg gates
+  - Removed all `#[cfg(feature = "events")]` gates across crossterm source (event system is now always-on)
+  - Added `signal-hook = "0.3"` to crossterm's unix deps (for self-pipe SIGWINCH pattern)
+  - Added `event`, `pipe`, `process` features to rustix dependency
+  - Build succeeds, all 160 tests pass (90 crossterm + 63 tau + 7 tau-host)
+- Files changed:
+  - `vendor/crossterm/src/event/source/unix/tau.rs` — new file
+  - `vendor/crossterm/src/event/sys/unix/waker/tau.rs` — new file
+  - `vendor/crossterm/src/event/source/unix.rs` — dispatch update
+  - `vendor/crossterm/src/event/sys/unix/waker.rs` — dispatch update
+  - `vendor/crossterm/src/event/sys/unix.rs` — feature gate cleanup
+  - `vendor/crossterm/src/event/sys.rs` — feature gate cleanup
+  - `vendor/crossterm/src/event.rs` — removed events feature gates
+  - `vendor/crossterm/src/lib.rs` — event module always public
+  - `vendor/crossterm/Cargo.toml` — added signal-hook, extended rustix features
+  - Multiple other crossterm files — removed `#[cfg(feature = "events")]`
+- Learnings for future iterations:
+  - `rustix::runtime::sigaction` needs the `runtime` feature and is complex. `signal-hook::low_level::pipe::register_raw` is cleaner.
+  - `rustix::pipe::pipe_with(PipeFlags::NONBLOCK)` is NOT available on macOS (cfg(not(apple))). Use `pipe()` + `ioctl_fionbio()` instead.
+  - The `events` feature was removed in US-019 but all event code was still gated behind it. Removing the gates makes the event system always available.
+  - `rustix::io::read()` returns `Vec<u8>` not `usize` — drain_pipe needs to check `Ok(b) if b.is_empty()` not `Ok(0)`.
+  - Waker can use `fd.as_fd()` from `AsFd` trait instead of unsafe `BorrowedFd::borrow_raw` when you have a reference to OwnedFd.
+## Task self-review PASSED
+---

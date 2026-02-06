@@ -118,32 +118,32 @@
 //! Check the [examples](https://github.com/crossterm-rs/crossterm/tree/master/examples) folder for more of
 //! them (`event-*`).
 
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) mod filter;
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) mod read;
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) mod source;
 #[cfg(feature = "event-stream")]
 pub(crate) mod stream;
 pub(crate) mod sys;
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) mod timeout;
 
 #[cfg(feature = "event-stream")]
 pub use stream::EventStream;
 
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 use crate::event::{
     filter::{EventFilter, Filter},
     read::InternalEventReader,
     timeout::PollTimeout,
 };
 use crate::{csi, Command};
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use std::fmt::{self, Display};
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 use std::time::Duration;
 
 use bitflags::bitflags;
@@ -151,16 +151,16 @@ use std::hash::{Hash, Hasher};
 
 /// Static instance of `InternalEventReader`.
 /// This needs to be static because there can be one event reader.
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 static INTERNAL_EVENT_READER: Mutex<Option<InternalEventReader>> = parking_lot::const_mutex(None);
 
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) fn lock_internal_event_reader() -> MappedMutexGuard<'static, InternalEventReader> {
     MutexGuard::map(INTERNAL_EVENT_READER.lock(), |reader| {
         reader.get_or_insert_with(InternalEventReader::default)
     })
 }
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 fn try_lock_internal_event_reader_for(
     duration: Duration,
 ) -> Option<MappedMutexGuard<'static, InternalEventReader>> {
@@ -209,7 +209,7 @@ fn try_lock_internal_event_reader_for(
 ///     poll(Duration::from_millis(100))
 /// }
 /// ```
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub fn poll(timeout: Duration) -> std::io::Result<bool> {
     poll_internal(Some(timeout), &EventFilter)
 }
@@ -255,7 +255,7 @@ pub fn poll(timeout: Duration) -> std::io::Result<bool> {
 ///     }
 /// }
 /// ```
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub fn read() -> std::io::Result<Event> {
     match read_internal(&EventFilter)? {
         InternalEvent::Event(event) => Ok(event),
@@ -265,7 +265,7 @@ pub fn read() -> std::io::Result<Event> {
 }
 
 /// Polls to check if there are any `InternalEvent`s that can be read within the given duration.
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) fn poll_internal<F>(timeout: Option<Duration>, filter: &F) -> std::io::Result<bool>
 where
     F: Filter,
@@ -284,7 +284,7 @@ where
 }
 
 /// Reads a single `InternalEvent`.
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 pub(crate) fn read_internal<F>(filter: &F) -> std::io::Result<InternalEvent>
 where
     F: Filter,
@@ -325,11 +325,11 @@ bitflags! {
 /// A command that enables mouse event capturing.
 ///
 /// Mouse events can be captured with [read](./fn.read.html)/[poll](./fn.poll.html).
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnableMouseCapture;
 
-#[cfg(feature = "events")]
+// events feature removed — always enabled
 impl Command for EnableMouseCapture {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
         f.write_str(concat!(

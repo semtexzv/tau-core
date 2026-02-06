@@ -234,7 +234,6 @@ pub use crate::command::{Command, ExecutableCommand, QueueableCommand, Synchroni
 /// A module to work with the terminal cursor
 pub mod cursor;
 /// A module to read events.
-#[cfg(any(feature = "events", feature = "event-stream"))]
 pub mod event;
 /// A module to apply attributes and colors on your text.
 pub mod style;
