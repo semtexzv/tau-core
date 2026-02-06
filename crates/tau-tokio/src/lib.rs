@@ -42,6 +42,7 @@ macro_rules! trace {
 pub mod fs;
 pub mod io;
 pub mod net;
+pub mod process;
 pub mod runtime;
 pub mod signal;
 pub mod sync;

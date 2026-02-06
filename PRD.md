@@ -836,7 +836,7 @@ Also fix `wake_by_ref`: it currently calls `wake_fn(data)` which does `Box::from
 
 ---
 
-### US-023: Add `tokio::process` module to the tokio shim [ ]
+### US-023: Add `tokio::process` module to the tokio shim [x]
 
 **Description:** As a plugin developer, I want `tokio::process::Command` so I can spawn child processes with async IO on their stdin/stdout/stderr, using the tau reactor instead of mio.
 
@@ -853,15 +853,15 @@ Crates like `which`, build tools, and agent frameworks (spawning `git`, `cargo`,
 > - Key: `kill_on_drop` is tokio-specific — when `Child` is dropped without waiting, send SIGKILL. We should support this.
 
 **Acceptance Criteria:**
-- [ ] Create `crates/tau-tokio/src/process/mod.rs`
-- [ ] `Command` struct wrapping `std::process::Command` with:
+- [x] Create `crates/tau-tokio/src/process/mod.rs`
+- [x] `Command` struct wrapping `std::process::Command` with:
   - All builder methods delegating to inner (`arg`, `args`, `env`, `envs`, `env_remove`, `env_clear`, `current_dir`, `stdin`, `stdout`, `stderr`)
   - `kill_on_drop(&mut self, kill: bool) -> &mut Command`
   - `spawn(&mut self) -> io::Result<Child>` — calls `std::process::Command::spawn()`, sets pipe fds to non-blocking, registers with reactor
   - `status(&mut self) -> impl Future<Output = io::Result<ExitStatus>>` — spawns + waits
   - `output(&mut self) -> impl Future<Output = io::Result<Output>>` — spawns + reads all pipes + waits
   - Unix-specific: `uid`, `gid`, `process_group`, `pre_exec`
-- [ ] `Child` struct with:
+- [x] `Child` struct with:
   - `pub stdin: Option<ChildStdin>`, `pub stdout: Option<ChildStdout>`, `pub stderr: Option<ChildStderr>`
   - `id() -> Option<u32>`
   - `start_kill(&mut self) -> io::Result<()>` — sends SIGKILL, does not wait
@@ -870,13 +870,13 @@ Crates like `which`, build tools, and agent frameworks (spawning `git`, `cargo`,
   - `try_wait(&mut self) -> io::Result<Option<ExitStatus>>`
   - `wait_with_output(self) -> io::Result<Output>` — async, reads all pipes concurrently + waits
   - `Drop` sends SIGKILL if `kill_on_drop` was set
-- [ ] `ChildStdin` implementing `AsyncWrite` — non-blocking fd registered with tau reactor via `AsyncFd`
-- [ ] `ChildStdout` implementing `AsyncRead` — non-blocking fd registered with tau reactor via `AsyncFd`
-- [ ] `ChildStderr` implementing `AsyncRead` — non-blocking fd registered with tau reactor via `AsyncFd`
-- [ ] SIGCHLD handling: self-pipe pattern — `pipe()` → signal handler writes byte → read end registered with reactor → `Child::wait()` polls readiness on the SIGCHLD pipe, then calls `try_wait()`
-- [ ] Add `pub mod process;` to `crates/tau-tokio/src/lib.rs`
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] `ChildStdin` implementing `AsyncWrite` — non-blocking fd registered with tau reactor via `AsyncFd`
+- [x] `ChildStdout` implementing `AsyncRead` — non-blocking fd registered with tau reactor via `AsyncFd`
+- [x] `ChildStderr` implementing `AsyncRead` — non-blocking fd registered with tau reactor via `AsyncFd`
+- [x] SIGCHLD handling: self-pipe pattern — `pipe()` → signal handler writes byte → read end registered with reactor → `Child::wait()` polls readiness on the SIGCHLD pipe, then calls `try_wait()`
+- [x] Add `pub mod process;` to `crates/tau-tokio/src/lib.rs`
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 
