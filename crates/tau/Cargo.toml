@@ -7,6 +7,11 @@ description = "Tau plugin SDK — statically compiled into each plugin"
 [lib]
 crate-type = ["rlib"]
 
+[features]
+json = ["dep:serde", "dep:serde_json"]
+
 [dependencies]
 tau-rt = { path = "../tau-rt" }
 futures-core = "0.3"
+serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }

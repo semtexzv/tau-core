@@ -1,9 +1,12 @@
-//! Stream Registry — FFI-safe bounded streams with push/poll/close.
+//! Stream Registry — FFI-safe bounded streams with inline ring buffer.
 //!
 //! Follows the same OnceLock + Mutex + HashMap + u64 handle pattern as events/resources.
-//! Each stream is a bounded queue of byte buffers with sender/receiver wakers.
+//! Each stream is a bounded ring buffer of `capacity × item_size` bytes.
+//! Items are copied in/out via `ptr::copy_nonoverlapping` — zero heap allocation per item.
+//! The host never interprets the bytes — just manages slots.
 
-use std::collections::{HashMap, VecDeque};
+use std::alloc::{self, Layout};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::task::Waker;
@@ -12,20 +15,58 @@ use tau_rt::types::FfiWaker;
 
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Host-side state for a single stream.
+///
+/// Safety: The buffer pointer is only accessed under the STREAMS mutex.
+/// The drop_in_place_fn is a static function pointer (valid for the process lifetime
+/// as long as the creating plugin is loaded — see US-008a for unload safety).
 struct StreamState {
-    /// Buffered items (byte vectors).
-    buffer: VecDeque<Vec<u8>>,
-    /// Maximum number of items in the buffer.
+    /// Flat ring buffer: `capacity × item_size` bytes, aligned to `item_align`.
+    buffer: *mut u8,
+    /// Layout used to allocate/deallocate the buffer.
+    buffer_layout: Layout,
+    /// Size of each item in bytes.
+    item_size: usize,
+    /// Maximum number of items in the ring buffer.
     capacity: usize,
+    /// Index of the next item to read (0..capacity).
+    head: usize,
+    /// Index of the next slot to write (0..capacity).
+    tail: usize,
+    /// Number of items currently in the buffer.
+    count: usize,
+    /// Function to call `drop_in_place::<T>()` on an item slot — runs T's destructor
+    /// without freeing memory (the ring buffer owns the storage).
+    drop_in_place_fn: unsafe extern "C" fn(*mut ()),
     /// Waker for the receiver (set by poll_next when buffer is empty).
     receiver_waker: Option<Waker>,
-    /// Waker for the sender (set by push when buffer is full).
+    /// Waker for the sender (set by poll_flush when buffer is full).
     sender_waker: Option<Waker>,
     /// True once the sender has called close — no more items will be pushed.
     sender_closed: bool,
     /// True once the receiver has been dropped — sender should stop pushing.
     receiver_dropped: bool,
 }
+
+impl Drop for StreamState {
+    fn drop(&mut self) {
+        // Drop all remaining buffered items by calling drop_in_place_fn on each slot.
+        for i in 0..self.count {
+            let idx = (self.head + i) % self.capacity;
+            let slot_ptr = unsafe { self.buffer.add(idx * self.item_size) };
+            unsafe { (self.drop_in_place_fn)(slot_ptr as *mut ()) };
+        }
+        // Deallocate the ring buffer.
+        if self.buffer_layout.size() > 0 {
+            unsafe { alloc::dealloc(self.buffer, self.buffer_layout) };
+        }
+    }
+}
+
+// Safety: StreamState contains a raw pointer (*mut u8) to the ring buffer,
+// which is only accessed under the STREAMS mutex. The drop_in_place_fn is a
+// static extern "C" function pointer — safe to send between threads.
+unsafe impl Send for StreamState {}
 
 static STREAMS: OnceLock<Mutex<HashMap<u64, StreamState>>> = OnceLock::new();
 
@@ -37,15 +78,49 @@ fn streams() -> &'static Mutex<HashMap<u64, StreamState>> {
 // FFI exports
 // =============================================================================
 
-/// Create a new bounded stream. Returns a handle.
+/// Create a new bounded stream with an inline ring buffer.
+///
+/// - `capacity`: max number of items (min 1)
+/// - `item_size`: `size_of::<T>()` in bytes
+/// - `item_align`: `align_of::<T>()` in bytes
+/// - `drop_in_place_fn`: function pointer to `ptr::drop_in_place::<T>()` — called on
+///   each remaining slot during cleanup
+///
+/// Returns a handle (u64).
 #[no_mangle]
-pub extern "C" fn tau_stream_create(capacity: u32) -> u64 {
+pub extern "C" fn tau_stream_create(
+    capacity: u32,
+    item_size: usize,
+    item_align: usize,
+    drop_in_place_fn: unsafe extern "C" fn(*mut ()),
+) -> u64 {
     let id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-    let cap = if capacity == 0 { 1 } else { capacity as usize }; // min capacity 1
+    let cap = if capacity == 0 { 1 } else { capacity as usize };
+
+    // Allocate the ring buffer with correct alignment.
+    // For ZSTs (item_size == 0), we use a dangling pointer and zero-size layout.
+    let (buffer, buffer_layout) = if item_size > 0 {
+        let layout = Layout::from_size_align(cap * item_size, item_align)
+            .expect("invalid layout for stream ring buffer");
+        let ptr = unsafe { alloc::alloc(layout) };
+        if ptr.is_null() {
+            alloc::handle_alloc_error(layout);
+        }
+        (ptr, layout)
+    } else {
+        // ZST: no allocation needed
+        (item_align as *mut u8, Layout::from_size_align(0, 1).unwrap())
+    };
 
     let state = StreamState {
-        buffer: VecDeque::new(),
+        buffer,
+        buffer_layout,
+        item_size,
         capacity: cap,
+        head: 0,
+        tail: 0,
+        count: 0,
+        drop_in_place_fn,
         receiver_waker: None,
         sender_waker: None,
         sender_closed: false,
@@ -56,16 +131,15 @@ pub extern "C" fn tau_stream_create(capacity: u32) -> u64 {
     id
 }
 
-/// Push an item to the stream.
+/// Push an item into the stream's ring buffer.
+///
+/// Copies `item_size` bytes from `item_ptr` into the next available slot.
+/// The caller must `mem::forget` the original value after a successful push
+/// (ownership of the bytes is transferred to the ring buffer).
+///
 /// Returns: 0 = ok, 1 = full, 2 = closed (receiver dropped or stream not found).
 #[no_mangle]
-pub extern "C" fn tau_stream_push(handle: u64, data_ptr: *const u8, data_len: usize) -> u8 {
-    let data = if data_len > 0 && !data_ptr.is_null() {
-        unsafe { std::slice::from_raw_parts(data_ptr, data_len) }.to_vec()
-    } else {
-        Vec::new()
-    };
-
+pub extern "C" fn tau_stream_push(handle: u64, item_ptr: *const u8) -> u8 {
     let mut map = streams().lock().unwrap();
     let Some(state) = map.get_mut(&handle) else {
         return 2; // not found → treat as closed
@@ -75,13 +149,21 @@ pub extern "C" fn tau_stream_push(handle: u64, data_ptr: *const u8, data_len: us
         return 2; // closed
     }
 
-    if state.buffer.len() >= state.capacity {
+    if state.count >= state.capacity {
         return 1; // full
     }
 
-    state.buffer.push_back(data);
+    // Copy item bytes into the ring buffer slot at `tail`.
+    if state.item_size > 0 {
+        let slot_ptr = unsafe { state.buffer.add(state.tail * state.item_size) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(item_ptr, slot_ptr, state.item_size);
+        }
+    }
+    state.tail = (state.tail + 1) % state.capacity;
+    state.count += 1;
 
-    // Wake receiver if it's waiting
+    // Wake receiver if it's waiting.
     if let Some(waker) = state.receiver_waker.take() {
         drop(map); // release lock before waking
         waker.wake();
@@ -90,17 +172,17 @@ pub extern "C" fn tau_stream_push(handle: u64, data_ptr: *const u8, data_len: us
     0 // ok
 }
 
-/// Poll for the next item in the stream.
-/// Returns: 0 = pending (waker stored), 1 = ready (out_ptr/out_len set), 2 = done (stream closed and empty).
+/// Poll for the next item in the stream's ring buffer.
 ///
-/// When returning 1 (ready), the caller owns the allocated buffer at *out_ptr with length *out_len.
-/// The caller must free it with `tau_stream_free_item`.
+/// Copies `item_size` bytes from the next ring buffer slot into `out_ptr`.
+/// The caller owns the bytes at `out_ptr` after a successful poll.
+///
+/// Returns: 0 = pending (waker stored), 1 = ready (bytes written to out_ptr), 2 = done.
 #[no_mangle]
 pub extern "C" fn tau_stream_poll_next(
     handle: u64,
     waker: FfiWaker,
-    out_ptr: *mut *const u8,
-    out_len: *mut usize,
+    out_ptr: *mut u8,
 ) -> u8 {
     let std_waker = waker.into_waker();
 
@@ -109,24 +191,19 @@ pub extern "C" fn tau_stream_poll_next(
         return 2; // not found → done
     };
 
-    if let Some(item) = state.buffer.pop_front() {
-        // Wake sender if it was blocked on a full buffer
-        let sender_waker = state.sender_waker.take();
-
-        // Write out the item
-        let len = item.len();
-        let ptr = if len > 0 {
-            let boxed = item.into_boxed_slice();
-            Box::into_raw(boxed) as *const u8
-        } else {
-            std::ptr::null()
-        };
-
-        unsafe {
-            *out_ptr = ptr;
-            *out_len = len;
+    if state.count > 0 {
+        // Copy item bytes from the ring buffer slot at `head` into out_ptr.
+        if state.item_size > 0 {
+            let slot_ptr = unsafe { state.buffer.add(state.head * state.item_size) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(slot_ptr, out_ptr, state.item_size);
+            }
         }
+        state.head = (state.head + 1) % state.capacity;
+        state.count -= 1;
 
+        // Wake sender if it was blocked on a full buffer.
+        let sender_waker = state.sender_waker.take();
         drop(map);
         if let Some(w) = sender_waker {
             w.wake();
@@ -136,20 +213,9 @@ pub extern "C" fn tau_stream_poll_next(
     } else if state.sender_closed {
         2 // done — no more items and sender closed
     } else {
-        // Store waker and return pending
+        // Store waker and return pending.
         state.receiver_waker = Some(std_waker);
         0 // pending
-    }
-}
-
-/// Free an item buffer returned by `tau_stream_poll_next`.
-#[no_mangle]
-pub extern "C" fn tau_stream_free_item(ptr: *const u8, len: usize) {
-    if !ptr.is_null() && len > 0 {
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(ptr as *mut u8, len);
-            drop(Box::from_raw(slice as *mut [u8]));
-        }
     }
 }
 
@@ -164,22 +230,26 @@ pub extern "C" fn tau_stream_close(handle: u64) {
 
     state.sender_closed = true;
 
-    // Wake receiver so it can see the stream is done
+    // Wake receiver so it can see the stream is done.
     let receiver_waker = state.receiver_waker.take();
 
-    // If receiver is also gone, clean up the entry entirely
-    if state.receiver_dropped {
-        map.remove(&handle);
+    // If receiver is also gone, clean up the entry entirely.
+    let should_remove = state.receiver_dropped;
+    if should_remove {
+        let state = map.remove(&handle);
+        drop(map);
+        drop(state); // StreamState::drop runs drop_in_place_fn on remaining items
+    } else {
+        drop(map);
     }
 
-    drop(map);
     if let Some(waker) = receiver_waker {
         waker.wake();
     }
 }
 
-/// Drop the stream (receiver side). Signals the sender that the receiver is gone.
-/// If both sides are done (sender closed + receiver dropped), the stream state is removed.
+/// Drop the receiver side. Signals the sender that the receiver is gone.
+/// If both sides are done, the stream state is removed and remaining items are dropped.
 #[no_mangle]
 pub extern "C" fn tau_stream_drop(handle: u64) {
     let mut map = streams().lock().unwrap();
@@ -189,15 +259,19 @@ pub extern "C" fn tau_stream_drop(handle: u64) {
 
     state.receiver_dropped = true;
 
-    // Wake sender if it was waiting (push will now return 'closed')
+    // Wake sender if it was waiting (push will now return 'closed').
     let sender_waker = state.sender_waker.take();
 
-    // If sender is also closed, clean up the entry entirely
-    if state.sender_closed {
-        map.remove(&handle);
+    // If sender is also closed, clean up the entry entirely.
+    let should_remove = state.sender_closed;
+    if should_remove {
+        let state = map.remove(&handle);
+        drop(map);
+        drop(state); // StreamState::drop runs drop_in_place_fn on remaining items
+    } else {
+        drop(map);
     }
 
-    drop(map);
     if let Some(w) = sender_waker {
         w.wake();
     }
@@ -218,7 +292,7 @@ pub extern "C" fn tau_stream_poll_flush(handle: u64, waker: FfiWaker) -> u8 {
         return 2; // closed
     }
 
-    if state.buffer.len() < state.capacity {
+    if state.count < state.capacity {
         return 1; // space available
     }
 

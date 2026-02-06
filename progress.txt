@@ -143,3 +143,26 @@
   - Future stream work (US-006+) will add FFI handles and combinators to this module
 ---
 ## Task self-review PASSED
+
+## Iteration 3 - US-006: StreamHandle — FFI-safe stream with push/poll/close
+- What was done:
+  - Created `crates/tau-host/src/runtime/streams.rs` — host-side stream registry with `StreamState` (VecDeque<Vec<u8>>, capacity, sender/receiver wakers, closed flags)
+  - 7 FFI exports: `tau_stream_create`, `tau_stream_push`, `tau_stream_poll_next`, `tau_stream_free_item`, `tau_stream_close`, `tau_stream_drop`, `tau_stream_poll_flush`
+  - Wired `pub mod streams` in `crates/tau-host/src/runtime/mod.rs`
+  - Extended `crates/tau/src/stream.rs` with FFI declarations + safe wrappers: `StreamSender` (push/send/close), `StreamReceiver` (impl Stream<Item=Vec<u8>>), `channel()` constructor
+  - `PushResult` enum for non-blocking push feedback (Ok/Full/Closed)
+  - `SendFuture` for async backpressure (waits via `tau_stream_poll_flush`)
+  - Fixed cleanup leak: `tau_stream_close` now removes entry if receiver already dropped
+- Files changed:
+  - `crates/tau-host/src/runtime/streams.rs` — new file, host-side stream registry
+  - `crates/tau-host/src/runtime/mod.rs` — added `pub mod streams`
+  - `crates/tau/src/stream.rs` — FFI declarations + safe wrappers
+  - `PRD.md` — marked US-006 acceptance criteria and header complete
+- Learnings for future iterations:
+  - Stream uses same OnceLock + Mutex + HashMap + u64 handle pattern as events/resources
+  - `make_ffi_waker(cx)` pattern: clone waker, box it, put raw ptr in FfiWaker.data, wake_fn unboxes + wakes. Same as tau-tokio/net (will be deduplicated by US-018)
+  - Cleanup requires symmetric checks: both `tau_stream_close` (sender) and `tau_stream_drop` (receiver) must check if the other side is done and remove the entry
+  - `FfiWaker` data pointer leaks if waker is dropped without being woken — pre-existing design issue, tracked for US-018
+  - `tau_stream_free_item` needed for cross-boundary memory ownership — host allocates Box<[u8]>, plugin copies and calls free
+---
+## Task self-review PASSED
