@@ -73,7 +73,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-002: Wire abort through `tau` crate and `JoinHandle` [ ]
+### US-002: Wire abort through `tau` crate and `JoinHandle` [x]
 
 **Description:** As a plugin developer, I want `JoinHandle::abort()` to actually cancel the task so I get Rust-standard cancellation semantics.
 
@@ -85,13 +85,13 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key: dropping a `JoinHandle` does NOT abort — it detaches the task. Only explicit `.abort()` cancels.
 
 **Acceptance Criteria:**
-- [ ] Add `extern "C" { fn tau_task_abort(task_id: u64) -> u8; }` declaration in `crates/tau/src/runtime.rs`
-- [ ] `JoinHandle::abort(&self)` calls `tau_task_abort(self.task_id)`
-- [ ] When an aborted task's `WrapperFuture` is dropped, it marks the `TaskCell` as complete with an "aborted" state (new `Stage::Aborted` variant)
-- [ ] `JoinHandle` polling a task in `Stage::Aborted` returns `Poll::Ready` with a value that the tokio shim can convert to `Err(JoinError)` with `is_cancelled() == true`
-- [ ] `JoinHandle::is_finished()` returns `true` for aborted tasks
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Add `extern "C" { fn tau_task_abort(task_id: u64) -> u8; }` declaration in `crates/tau/src/runtime.rs`
+- [x] `JoinHandle::abort(&self)` calls `tau_task_abort(self.task_id)`
+- [x] When an aborted task's `WrapperFuture` is dropped, it marks the `TaskCell` as complete with an "aborted" state (new `Stage::Aborted` variant)
+- [x] `JoinHandle` polling a task in `Stage::Aborted` returns `Poll::Ready` with a value that the tokio shim can convert to `Err(JoinError)` with `is_cancelled() == true`
+- [x] `JoinHandle::is_finished()` returns `true` for aborted tasks
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

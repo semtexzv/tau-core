@@ -2,5 +2,31 @@
 
 ## Learnings
 (Patterns discovered during implementation)
+- `tau` crate re-exports everything from `tau-rt` via `pub use tau_rt::*`. The actual runtime code lives in `crates/tau-rt/src/runtime.rs`, not `crates/tau/src/runtime.rs` (which doesn't exist).
+- `JoinHandle<T>` output is `Option<T>` at the tau level — `Some(val)` for success, `None` for abort. The tokio shim converts `None` → `Err(JoinError { cancelled: true })`.
+- Guard tests in `crates/tau/src/guard.rs` use a shared `static UNLOADED: AtomicBool` that causes flaky failures when tests run in parallel. Use `--test-threads=1` for reliable full suite runs.
 
 ---
+
+## Iteration 1 - US-002: Wire abort through tau crate and JoinHandle
+- What was done:
+  - Added `tau_task_abort` FFI declaration to `crates/tau-rt/src/runtime.rs` extern block
+  - Added `Stage::Aborted` variant to the `Stage<T>` enum
+  - Implemented `JoinHandle::abort()` to call `tau_task_abort(self.task_id)`
+  - Updated `WrapperFuture::drop` to detect abort (stage still Running) and mark TaskCell as `Stage::Aborted`, set complete flag, wake JoinHandle waker
+  - Changed `JoinHandle` output from `T` to `Option<T>` — `Some(val)` for success, `None` for abort
+  - Updated `try_read_output` vtable function to handle `Stage::Aborted` → `Poll::Ready(None)`
+  - Updated `block_on` to handle `Option<T>` return
+  - Updated tokio shim `JoinHandle` to convert `None` → `Err(JoinError { cancelled: true })`
+  - Added `cancelled: bool` field to `JoinError`
+- Files changed:
+  - `crates/tau-rt/src/runtime.rs` — core abort wiring
+  - `crates/tau-tokio/src/lib.rs` — tokio shim JoinHandle/JoinError updates
+  - `PRD.md` — marked acceptance criteria
+- Learnings for future iterations:
+  - The `WrapperFuture::drop` is the key integration point — when the host executor drops the future (after abort), this is where the TaskCell gets marked as aborted and the JoinHandle waker is notified
+  - `is_finished()` automatically works for aborted tasks because the `complete` AtomicBool is set in `WrapperFuture::drop`
+  - US-003 needs to wire `AbortHandle` with a real `task_id` instead of the current phantom marker
+---
+
+## Task self-review PASSED

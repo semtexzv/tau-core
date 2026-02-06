@@ -107,19 +107,22 @@ impl<T> Future for JoinHandle<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let inner = unsafe { &mut self.get_unchecked_mut().inner };
         match unsafe { Pin::new_unchecked(inner) }.poll(cx) {
-            Poll::Ready(val) => Poll::Ready(Ok(val)),
+            Poll::Ready(Some(val)) => Poll::Ready(Ok(val)),
+            Poll::Ready(None) => Poll::Ready(Err(JoinError { cancelled: true })),
             Poll::Pending => Poll::Pending,
         }
     }
 }
 
 #[derive(Debug)]
-pub struct JoinError;
+pub struct JoinError {
+    cancelled: bool,
+}
 
 impl JoinError {
     /// Returns `true` if the task was cancelled.
     pub fn is_cancelled(&self) -> bool {
-        false
+        self.cancelled
     }
 }
 

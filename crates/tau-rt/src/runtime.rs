@@ -38,6 +38,7 @@ extern "C" {
     fn tau_timer_create(nanos_from_now: u64) -> u64;
     fn tau_timer_check(handle: u64) -> u8;
     fn tau_timer_cancel(handle: u64);
+    fn tau_task_abort(task_id: u64) -> u8;
 }
 
 // =============================================================================
@@ -63,6 +64,7 @@ pub fn drive() -> u32 {
 enum Stage<T> {
     Running,
     Finished(T),
+    Aborted,
     Consumed,
 }
 
@@ -130,10 +132,11 @@ impl Copy for RawTask {}
 unsafe fn try_read_output<T>(cell_ptr: NonNull<()>, dst: *mut ()) {
     let cell = cell_ptr.as_ptr() as *mut TaskCell<T>;
     let stage = &mut *(*cell).stage.get();
-    let out = &mut *(dst as *mut Poll<T>);
+    let out = &mut *(dst as *mut Poll<Option<T>>);
     
     match std::mem::replace(stage, Stage::Consumed) {
-        Stage::Finished(result) => *out = Poll::Ready(result),
+        Stage::Finished(result) => *out = Poll::Ready(Some(result)),
+        Stage::Aborted => *out = Poll::Ready(None),
         Stage::Running => {
             *stage = Stage::Running;
             *out = Poll::Pending;
@@ -194,7 +197,7 @@ impl<T> JoinHandle<T> {
     }
 
     pub fn abort(&self) {
-        // TODO: implement task cancellation
+        unsafe { tau_task_abort(self.task_id) };
     }
 
     pub fn is_finished(&self) -> bool {
@@ -204,19 +207,19 @@ impl<T> JoinHandle<T> {
 
 // Future impl - NO 'static bound on T!
 impl<T> Future for JoinHandle<T> {
-    type Output = T;
+    type Output = Option<T>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
         if !unsafe { (self.raw.vtable.is_complete)(self.raw.ptr) } {
             unsafe { (self.raw.vtable.set_waker)(self.raw.ptr, Some(cx.waker().clone())) };
             return Poll::Pending;
         }
         
-        let mut result: Poll<T> = Poll::Pending;
+        let mut result: Poll<Option<T>> = Poll::Pending;
         unsafe {
             (self.raw.vtable.try_read_output)(
                 self.raw.ptr,
-                &mut result as *mut Poll<T> as *mut (),
+                &mut result as *mut Poll<Option<T>> as *mut (),
             );
         }
         result
@@ -323,8 +326,20 @@ impl<F: Future> Future for WrapperFuture<F> {
 
 impl<F: Future> Drop for WrapperFuture<F> {
     fn drop(&mut self) {
-        // Decrement ref count when wrapper is dropped
         unsafe {
+            let cell = &*self.cell_ptr;
+            // If the task is still running when the wrapper is dropped,
+            // it means the task was aborted. Mark it as such and wake the JoinHandle.
+            let stage = &mut *cell.stage.get();
+            if matches!(stage, Stage::Running) {
+                *stage = Stage::Aborted;
+                cell.complete.store(true, Ordering::Release);
+                if let Some(waker) = (*cell.waker.get()).take() {
+                    waker.wake();
+                }
+            }
+
+            // Decrement ref count when wrapper is dropped
             if (self.vtable.dec_ref)(NonNull::new_unchecked(self.cell_ptr as *mut ())) {
                 (self.vtable.drop_cell)(NonNull::new_unchecked(self.cell_ptr as *mut ()));
             }
@@ -391,7 +406,7 @@ where
     }
     
     // Read result
-    let mut result: Poll<F::Output> = Poll::Pending;
+    let mut result: Poll<Option<F::Output>> = Poll::Pending;
     unsafe {
         (raw.vtable.try_read_output)(raw.ptr, &mut result as *mut _ as *mut ());
     }
@@ -404,7 +419,8 @@ where
     }
     
     match result {
-        Poll::Ready(val) => val,
+        Poll::Ready(Some(val)) => val,
+        Poll::Ready(None) => panic!("block_on: task was aborted"),
         Poll::Pending => panic!("block_on: task did not complete"),
     }
 }
