@@ -1,0 +1,5 @@
+# Crossterm integration test — smoke test
+# Tests that the crossterm-test-plugin compiles, loads, and terminal::size() works
+
+load ct plugins/crossterm-test-plugin
+send ct size

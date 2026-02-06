@@ -751,7 +751,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-022: Crossterm integration test — sync and async events [ ]
+### US-022: Crossterm integration test — sync and async events [x]
 
 **Description:** As a developer, I want a test plugin that proves crossterm's sync and async event APIs work through the tau reactor.
 
@@ -762,17 +762,17 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Key: the test doesn't need to verify every key event — just that (1) the plugin compiles, (2) `terminal::size()` returns a valid result, (3) `EventStream` can be created without panicking, (4) the reactor correctly wakes on stdin readability
 
 **Acceptance Criteria:**
-- [ ] Create `plugins/crossterm-test-plugin/` that depends on `crossterm = { version = "0.28", features = ["event-stream"] }`
-- [ ] Plugin init: enables raw mode, hides cursor
-- [ ] Plugin destroy: disables raw mode, shows cursor
-- [ ] On request "poll <ms>": calls `crossterm::event::poll(Duration::from_millis(ms))`, reports result
-- [ ] On request "read": calls `crossterm::event::read()`, prints the event
-- [ ] On request "stream": spawns a task that creates an `EventStream`, reads 5 events via `.next().await`, prints them
-- [ ] On request "size": calls `crossterm::terminal::size()`, prints result
-- [ ] Plugin compiles via `./dist/run.sh --plugin plugins/crossterm-test-plugin`
-- [ ] Basic smoke test: load plugin, send "size", verify response
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Create `plugins/crossterm-test-plugin/` that depends on `crossterm = { version = "0.28", features = ["event-stream"] }`
+- [x] Plugin init: enables raw mode, hides cursor
+- [x] Plugin destroy: disables raw mode, shows cursor
+- [x] On request "poll <ms>": calls `crossterm::event::poll(Duration::from_millis(ms))`, reports result
+- [x] On request "read": calls `crossterm::event::read()`, prints the event
+- [x] On request "stream": spawns a task that creates an `EventStream`, reads 5 events via `.next().await`, prints them
+- [x] On request "size": calls `crossterm::terminal::size()`, prints result
+- [x] Plugin compiles via `./dist/run.sh --plugin plugins/crossterm-test-plugin`
+- [x] Basic smoke test: load plugin, send "size", verify response
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 
