@@ -497,6 +497,8 @@ pub fn poll_snapshot(snap: &TaskSnapshot) -> FfiPoll {
     let waker = FfiWaker {
         data: snap.task_id as *mut (),
         wake_fn: Some(wake_task_fn),
+        clone_fn: None, // task ID is non-owned — shallow copy is safe
+        drop_fn: None,  // task ID is non-owned — nothing to free
     };
 
     rt_debug!("poll task_id={} plugin_id={} future_ptr={:?}", snap.task_id, snap.plugin_id, snap.future_ptr);

@@ -776,7 +776,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-018a: Fix FfiWaker memory leak — `into_waker` vtable drop doesn't free inner data [ ]
+### US-018a: Fix FfiWaker memory leak — `into_waker` vtable drop doesn't free inner data [x]
 
 **Description:** `make_ffi_waker(cx)` stores a `Box<std::task::Waker>` in `FfiWaker.data`. But `FfiWaker::into_waker()`'s vtable `drop` function only frees the outer `Box<FfiWaker>` — it never frees the inner boxed Waker pointed to by `data`. This leaks ~16 bytes every time a reactor `poll_ready` call returns "already ready" (the waker is created, converted via `into_waker`, then dropped without ever being woken). It also leaks when a stored waker is replaced by a new one via `clone_from`.
 
@@ -790,12 +790,12 @@ The root cause: `FfiWaker` was originally designed for non-owned task IDs (`data
 Also fix `wake_by_ref`: it currently calls `wake_fn(data)` which does `Box::from_raw`, consuming the inner allocation. A second `wake_by_ref` or subsequent `drop` would use a dangling pointer. For the task-ID model this was harmless (non-owning), but for owned data it violates the `Waker` contract.
 
 **Acceptance Criteria:**
-- [ ] `into_waker` vtable's `drop` frees the inner `data` allocation (no leak)
-- [ ] `wake_by_ref` does not consume/free the inner `data` (must be safe to call multiple times)
-- [ ] `clone` produces an independent copy (not sharing the same inner allocation)
-- [ ] `wake` (by value) still frees everything correctly
-- [ ] All existing tests pass
-- [ ] The reactor's `poll_ready` → "already ready" path does not leak
+- [x] `into_waker` vtable's `drop` frees the inner `data` allocation (no leak)
+- [x] `wake_by_ref` does not consume/free the inner `data` (must be safe to call multiple times)
+- [x] `clone` produces an independent copy (not sharing the same inner allocation)
+- [x] `wake` (by value) still frees everything correctly
+- [x] All existing tests pass
+- [x] The reactor's `poll_ready` → "already ready" path does not leak
 
 ---
 

@@ -22,7 +22,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 // =============================================================================
@@ -479,28 +479,6 @@ impl Drop for SleepFuture {
 // =============================================================================
 
 fn ffi_waker_to_std(ffi: FfiWaker) -> Waker {
-    let boxed = Box::new(ffi);
-    let ptr = Box::into_raw(boxed) as *const ();
-
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |ptr| {
-            let ffi = unsafe { &*(ptr as *const FfiWaker) };
-            let cloned = Box::new(*ffi);
-            RawWaker::new(Box::into_raw(cloned) as *const (), &VTABLE)
-        },
-        |ptr| {
-            let ffi = unsafe { Box::from_raw(ptr as *mut FfiWaker) };
-            ffi.wake();
-        },
-        |ptr| {
-            let ffi = unsafe { &*(ptr as *const FfiWaker) };
-            ffi.wake();
-        },
-        |ptr| {
-            unsafe { drop(Box::from_raw(ptr as *mut FfiWaker)) };
-        },
-    );
-
-    let raw = RawWaker::new(ptr, &VTABLE);
-    unsafe { Waker::from_raw(raw) }
+    // Delegate to FfiWaker::into_waker which handles clone_fn/drop_fn correctly
+    ffi.into_waker()
 }

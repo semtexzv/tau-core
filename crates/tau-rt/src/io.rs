@@ -67,6 +67,11 @@ pub fn deregister(handle: u64) {
 /// Clones the waker from `cx`, boxes it, and returns an `FfiWaker` whose
 /// `wake_fn` unboxes and calls `waker.wake()`. This is the canonical utility —
 /// use it instead of duplicating the clone-box-wake pattern.
+///
+/// The returned `FfiWaker` has proper ownership semantics:
+/// - `wake_fn`: unboxes the inner `Waker` and calls `wake()` (consumes)
+/// - `clone_fn`: clones the inner `Waker` into a new box (independent copy)
+/// - `drop_fn`: frees the inner `Waker` without waking
 pub fn make_ffi_waker(cx: &std::task::Context<'_>) -> FfiWaker {
     let waker = cx.waker().clone();
     let data = Box::into_raw(Box::new(waker)) as *mut ();
@@ -76,9 +81,20 @@ pub fn make_ffi_waker(cx: &std::task::Context<'_>) -> FfiWaker {
         waker.wake();
     }
 
+    extern "C" fn clone_fn(data: *mut ()) -> *mut () {
+        let waker = unsafe { &*(data as *const std::task::Waker) };
+        Box::into_raw(Box::new(waker.clone())) as *mut ()
+    }
+
+    extern "C" fn drop_fn(data: *mut ()) {
+        unsafe { drop(Box::from_raw(data as *mut std::task::Waker)) };
+    }
+
     FfiWaker {
         data,
         wake_fn: Some(wake_fn),
+        clone_fn: Some(clone_fn),
+        drop_fn: Some(drop_fn),
     }
 }
 
