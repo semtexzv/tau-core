@@ -21,7 +21,6 @@ pub const READABLE: u8 = 0b01;
 pub const WRITABLE: u8 = 0b10;
 
 pub const DIR_READ: u8 = 0;
-pub const DIR_WRITE: u8 = 1;
 
 // =============================================================================
 // Per-socket IO state

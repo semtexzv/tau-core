@@ -254,16 +254,6 @@ impl Runtime {
         }
     }
 
-    /// Check if any tasks from a plugin are still running.
-    pub fn has_plugin_tasks(&self, plugin_id: u64) -> bool {
-        self.tasks.values().any(|t| t.plugin_id == plugin_id && !t.completed)
-    }
-
-    /// Get count of tasks from a plugin.
-    pub fn plugin_task_count(&self, plugin_id: u64) -> usize {
-        self.tasks.values().filter(|t| t.plugin_id == plugin_id).count()
-    }
-
     /// Drop all tasks belonging to a plugin (for unload).
     /// Sets CURRENT_PLUGIN so any tau calls in destructors are tagged correctly.
     /// Returns the number of tasks dropped.

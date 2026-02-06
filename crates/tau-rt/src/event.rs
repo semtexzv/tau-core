@@ -95,33 +95,7 @@ pub fn emit_raw(channel: &str, data: &[u8]) -> u32 {
 }
 
 // =============================================================================
-// Convenience: JSON-based typed events (requires serde)
-// =============================================================================
-
-/// Emit a serializable value as JSON bytes.
-#[cfg(feature = "json")]
-pub fn emit<T: serde::Serialize>(channel: &str, value: &T) -> u32 {
-    let data = serde_json::to_vec(value).expect("Failed to serialize event");
-    emit_raw(channel, &data)
-}
-
-/// Subscribe with automatic JSON deserialization.
-#[cfg(feature = "json")]
-pub fn subscribe<T, F>(channel: &str, callback: F) -> Subscription
-where
-    T: serde::de::DeserializeOwned + 'static,
-    F: Fn(T) + Send + 'static,
-{
-    subscribe_raw(channel, move |data| {
-        match serde_json::from_slice::<T>(data) {
-            Ok(value) => callback(value),
-            Err(e) => eprintln!("[tau::event] Failed to deserialize on '{}': {}", "<channel>", e),
-        }
-    })
-}
-
-// =============================================================================
-// Convenience: Simple string events (no serde dependency)
+// Convenience: Simple string events
 // =============================================================================
 
 /// Emit a string event.

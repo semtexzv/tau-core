@@ -166,16 +166,6 @@ pub fn clear_current_plugin() {
     executor::clear_current_plugin();
 }
 
-/// Check if a plugin has any running tasks.
-pub fn has_plugin_tasks(plugin_id: u64) -> bool {
-    RUNTIME.with(|rt| rt.borrow().has_plugin_tasks(plugin_id))
-}
-
-/// Get count of tasks owned by a plugin.
-pub fn plugin_task_count(plugin_id: u64) -> usize {
-    RUNTIME.with(|rt| rt.borrow().plugin_task_count(plugin_id))
-}
-
 /// Drop all tasks owned by a plugin (for unload).
 /// SAFETY: Call this BEFORE dlclose() to avoid dangling pointers.
 pub fn drop_plugin_tasks(plugin_id: u64) -> usize {

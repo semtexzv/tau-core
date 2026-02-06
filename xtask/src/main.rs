@@ -146,6 +146,10 @@ fn dist(release: bool) {
         eprintln!("  Warning: libstd dylib not found in {:?}", std_lib_dir);
     }
 
+    // Crates provided as prebuilt dylibs (via --extern, NOT built from source).
+    // Their path deps must be stripped from dist Cargo.tomls to avoid E0464.
+    let prebuilt_names: Vec<&str> = vec!["tau-rt"];
+
     // 4. Copy source crates (driven by patches.list)
     println!("[4/5] Copying source crates...");
     for patch in &patches {
@@ -169,12 +173,19 @@ fn dist(release: bool) {
         println!("  {} → src/{}/", patch.rel_path, patch.name);
     }
 
-    // Post-process: strip workspace-relative `path = ...` deps from dist Cargo.toml
-    // files. In dist, deps are resolved via --extern or patches from the host.
+    // Strip path deps that point to prebuilt dylibs.
+    //
+    // WHY: The host compiler passes `--extern=tau_rt=/path/to/libtau_rt.dylib`
+    // so plugins link against the ONE shared copy. If tau's Cargo.toml also has
+    // `tau-rt = { path = "../tau-rt" }`, cargo builds tau-rt from source too,
+    // producing TWO dylib candidates → E0464 "multiple candidates for dylib".
+    //
+    // By stripping the path dep, cargo resolves tau_rt solely via --extern.
+    // Same logic applies to any crate provided as a prebuilt dylib.
     for patch in &patches {
         let toml_path = dist_dir.join("src").join(&patch.name).join("Cargo.toml");
         if toml_path.exists() {
-            strip_path_deps(&toml_path);
+            strip_prebuilt_deps(&toml_path, &prebuilt_names);
         }
     }
 
@@ -207,16 +218,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     print_dir_sizes(&dist_dir);
 }
 
-/// Strip lines like `tau = { path = ... }` or `tau-rt = { path = ... }` from a
-/// Cargo.toml. In the dist bundle, these deps come via --extern / patches.
-fn strip_path_deps(toml_path: &Path) {
+/// Strip path dependencies on prebuilt dylib crates from a Cargo.toml.
+///
+/// When the host compiler provides a crate via `--extern=foo=/path/to/libfoo.dylib`,
+/// any `foo = { path = "..." }` dep in the Cargo.toml would cause cargo to also
+/// build it from source, resulting in two dylib candidates (E0464).
+///
+/// This function removes lines like `tau-rt = { path = "../tau-rt" }` for crates
+/// in the prebuilt set, so --extern is the sole provider.
+fn strip_prebuilt_deps(toml_path: &Path, prebuilt: &[&str]) {
     let content = fs::read_to_string(toml_path).unwrap();
     let filtered: String = content
         .lines()
         .filter(|line| {
-            let trimmed = line.trim_start();
-            // Keep the line unless it's a `foo = { path = "..." }` dependency
-            !(trimmed.contains("path =") && trimmed.contains('{'))
+            let trimmed = line.trim();
+            // Check if this line is a dep on a prebuilt crate
+            for name in prebuilt {
+                if trimmed.starts_with(name) && trimmed.contains("path =") {
+                    return false;
+                }
+            }
+            true
         })
         .collect::<Vec<_>>()
         .join("\n");

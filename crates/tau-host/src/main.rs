@@ -15,8 +15,6 @@ use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-pub extern crate tau as _;
-
 // =============================================================================
 // Message type (shared protocol with plugins)
 // =============================================================================
@@ -213,9 +211,6 @@ impl Host {
         runtime::tau_block_on(task_id);
     }
 
-    pub fn std_lib_path(&self) -> Option<PathBuf> {
-        self.compiler.as_ref().map(|c| c.std_dylib.parent().unwrap().to_path_buf())
-    }
 }
 
 // =============================================================================
@@ -281,14 +276,9 @@ fn main() {
     let exe_path = std::env::current_exe().expect("Failed to get exe path");
     let exe_dir = exe_path.parent().unwrap();
 
-    // Resolve interface crate paths (tau + tokio shim).
-    // In dist layout: dist/src/{tau,tokio}
-    // Resolve patch paths.
-    // In dist layout: dist/src/{tau,tau-rt,tokio}/
-    // In dev layout:  workspace_root/crates/{tau,tau-rt,tau-tokio}/
-    //
-    // patches.list is relative to workspace root. We detect which layout
-    // we're in by checking if the dist src dir exists.
+    // Resolve patch paths from patches.list.
+    // Dist layout: dist/src/{tau,tau-rt,tokio}/
+    // Dev layout:  workspace_root/crates/{tau,tau-rt,tau-tokio}/
     let patches = {
         let dist_src_root = exe_dir.parent().unwrap().join("src");
         // dev: exe is in target/debug/tau, workspace root is ../../
@@ -423,14 +413,11 @@ fn main() {
             // Collect explicit --plugin args
             let mut args_iter = args.iter().skip(1);
             let mut explicit_plugins = Vec::new();
-            let mut reload_test = false;
             while let Some(arg) = args_iter.next() {
                 if arg == "--plugin" {
                     if let Some(path) = args_iter.next() {
                         explicit_plugins.push(PathBuf::from(path));
                     }
-                } else if arg == "--reload" {
-                    reload_test = true;
                 }
             }
 

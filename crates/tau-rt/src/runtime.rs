@@ -89,10 +89,6 @@ impl<T> TaskCell<T> {
         }))
     }
 
-    unsafe fn inc_ref(ptr: *mut Self) {
-        (*ptr).ref_count.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Decrement ref count. Returns true if this was the last ref.
     unsafe fn dec_ref(ptr: *mut Self) -> bool {
         if (*ptr).ref_count.fetch_sub(1, Ordering::Release) == 1 {

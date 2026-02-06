@@ -1,13 +1,11 @@
-//! Re-exported from `tau::guard`.
+//! Host-side PluginGuard constructor.
 //!
-//! Host-side convenience: create a [`PluginGuard`] from a raw `dlopen` handle.
+//! Creates a [`PluginGuard`](tau::PluginGuard) from a raw `dlopen` handle.
 
-pub use tau::guard::*;
-
-/// Create a [`PluginGuard`] from a raw `libc::dlopen` handle.
+/// Create a [`PluginGuard`](tau::PluginGuard) from a raw `libc::dlopen` handle.
 ///
-/// This is the host-side constructor. The guard takes ownership of the handle
-/// and will call `libc::dlclose` when the last clone is dropped.
+/// The guard prevents `dlclose` while any `PluginBox`/`PluginArc`/`PluginFn`
+/// values from this plugin exist. When the last clone is dropped, `dlclose` runs.
 ///
 /// # Safety
 ///
