@@ -87,6 +87,9 @@ pub struct Compiler {
     #[allow(dead_code)]
     pub target: String,
     pub version_string: String,
+    /// Cached environment hash (compiler + flags + tau-rt + patches).
+    /// Computed on first use via `get_or_compute_env_hash()`.
+    env_hash: std::cell::OnceCell<String>,
 }
 
 impl Compiler {
@@ -115,6 +118,7 @@ impl Compiler {
             std_dylib,
             target,
             version_string: Self::HOST_VERSION.to_string(),
+            env_hash: std::cell::OnceCell::new(),
         })
     }
 
@@ -311,6 +315,54 @@ impl Compiler {
         Err("std dylib not found".into())
     }
 
+    /// Compute the environment hash once and cache it. Includes compiler version,
+    /// flags, tau-rt content, and patches.list — everything that's shared across
+    /// all plugins. When any of these change, all plugins get fresh build dirs.
+    fn get_or_compute_env_hash(&self, dist_lib_path: &Path) -> &str {
+        self.env_hash.get_or_init(|| {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut hasher = DefaultHasher::new();
+
+            // Compiler identity
+            Self::HOST_VERSION.hash(&mut hasher);
+            Self::HOST_RUSTFLAGS.hash(&mut hasher);
+            Self::HOST_PANIC.hash(&mut hasher);
+            Self::HOST_TARGET_FEATURES.hash(&mut hasher);
+
+            // tau-rt dylib content (ABI fingerprint)
+            let tau_rt_dylib = dist_lib_path.join("libtau_rt.dylib");
+            if tau_rt_dylib.exists() {
+                if let Ok(bytes) = std::fs::read(&tau_rt_dylib) {
+                    bytes.hash(&mut hasher);
+                }
+            }
+
+            // Patch list (which crates are patched and their paths)
+            PATCHES_LIST.hash(&mut hasher);
+
+            format!("{:x}", hasher.finish())
+        })
+    }
+
+    /// Parse the package name from a plugin's Cargo.toml.
+    fn parse_crate_name(source_dir: &Path) -> Result<String, String> {
+        let manifest = std::fs::read_to_string(source_dir.join("Cargo.toml"))
+            .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
+
+        manifest
+            .lines()
+            .find(|l| l.trim().starts_with("name"))
+            .and_then(|l| l.split('=').nth(1))
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .ok_or_else(|| format!("Could not determine package name from {:?}", source_dir))
+    }
+
+    /// Build cache directory: `~/.tau/buildcache/<env_hash>/<crate_name>.<src_hash>/`
+    ///
+    /// The two-level hierarchy separates the environment (compiler + flags + tau-rt)
+    /// from individual plugin identity (crate name + source path).
     fn get_build_cache_dir(
         &self,
         source_dir: &Path,
@@ -323,22 +375,19 @@ impl Compiler {
             std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
         let cache_root = home.join(".tau").join("buildcache");
 
+        // Level 1: environment hash (shared across all plugins)
+        let env_hash = self.get_or_compute_env_hash(dist_lib_path);
+
+        // Level 2: crate name + short hash of source path (per-plugin identity)
+        let crate_name = Self::parse_crate_name(source_dir)?;
         let mut hasher = DefaultHasher::new();
         source_dir.hash(&mut hasher);
+        let src_hash = format!("{:x}", hasher.finish());
+        let short_hash = &src_hash[..8.min(src_hash.len())];
 
-        // Include compiler version so toolchain changes invalidate the cache
-        self.version_string.hash(&mut hasher);
-
-        // Include libtau_rt.dylib content hash so recompiling tau-rt invalidates plugins
-        // (symbol hashes change when tau-rt is rebuilt)
-        let tau_rt_dylib = dist_lib_path.join("libtau_rt.dylib");
-        if tau_rt_dylib.exists() {
-            if let Ok(bytes) = std::fs::read(&tau_rt_dylib) {
-                bytes.hash(&mut hasher);
-            }
-        }
-
-        let cache_dir = cache_root.join(format!("{:x}", hasher.finish()));
+        let cache_dir = cache_root
+            .join(env_hash)
+            .join(format!("{}.{}", crate_name, short_hash));
 
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("Failed to create cache dir: {}", e))?;
@@ -451,17 +500,7 @@ impl Compiler {
         build_dir: &Path,
         plugins_dir: &Path,
     ) -> Result<PathBuf, String> {
-        // Parse package name from Cargo.toml
-        let manifest = std::fs::read_to_string(source_dir.join("Cargo.toml"))
-            .map_err(|e| format!("Failed to read Cargo.toml: {}", e))?;
-
-        let package_name = manifest
-            .lines()
-            .find(|l| l.trim().starts_with("name"))
-            .and_then(|l| l.split('=').nth(1))
-            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-            .ok_or("Could not determine package name")?;
-
+        let package_name = Self::parse_crate_name(source_dir)?;
         let crate_name = package_name.replace('-', "_");
         let dylib_name = format!("lib{}.dylib", crate_name);
         let built_path = build_dir.join(&dylib_name);

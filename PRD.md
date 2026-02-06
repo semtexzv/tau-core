@@ -201,7 +201,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-COMP-001: Restructure build cache with environment hash [ ]
+### US-COMP-001: Restructure build cache with environment hash [x]
 
 **Description:** The current build cache layout hashes everything together (source dir + compiler version + tau-rt dylib content) into a single flat directory per plugin. This means: tau-rt is re-read and hashed on every build, compiler/env changes create N orphaned directories (one per plugin), and there's no way to garbage-collect stale caches.
 
@@ -237,14 +237,14 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 - Crate name (parsed from `Cargo.toml`) + short hash of the canonicalized source path (to disambiguate same-name plugins from different locations)
 
 **Acceptance Criteria:**
-- [ ] Compute `env_hash` once in `Compiler::resolve()` (or a new `Compiler::init_cache()` method), store on the struct
-- [ ] `get_build_cache_dir()` returns `~/.tau/buildcache/<env_hash>/<crate_name>.<src_hash>/`
-- [ ] Plugin crate name is parsed from `Cargo.toml` for the directory name (human-readable)
-- [ ] Old flat cache dirs (`~/.tau/buildcache/<single_hash>/`) are ignored (backward compat — they'll be cleaned up manually or by a future GC story)
-- [ ] When the environment changes (new compiler, rebuilt tau-rt, changed patches), all plugins get fresh build dirs automatically
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
-- [ ] Manually verify: rebuild tau-rt → `cargo xtask dist` → `./dist/run.sh --plugin plugins/example-plugin` creates a new `<env_hash>/` dir
+- [x] Compute `env_hash` once in `Compiler::resolve()` (or a new `Compiler::init_cache()` method), store on the struct
+- [x] `get_build_cache_dir()` returns `~/.tau/buildcache/<env_hash>/<crate_name>.<src_hash>/`
+- [x] Plugin crate name is parsed from `Cargo.toml` for the directory name (human-readable)
+- [x] Old flat cache dirs (`~/.tau/buildcache/<single_hash>/`) are ignored (backward compat — they'll be cleaned up manually or by a future GC story)
+- [x] When the environment changes (new compiler, rebuilt tau-rt, changed patches), all plugins get fresh build dirs automatically
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
+- [x] Manually verify: rebuild tau-rt → `cargo xtask dist` → `./dist/run.sh --plugin plugins/example-plugin` creates a new `<env_hash>/` dir
 
 ---
 
