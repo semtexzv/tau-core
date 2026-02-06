@@ -1,0 +1,14 @@
+[package]
+name = "tau-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI library with differential rendering for tau"
+
+[dependencies]
+tau = { path = "../tau" }
+crossterm = { version = "0.28", default-features = false, features = ["bracketed-paste"] }
+unicode-width = "0.1.13"
+unicode-segmentation = "1.10"
+
+[dev-dependencies]
+# image = "0.25" # Used in original but maybe not needed immediately unless tests use it

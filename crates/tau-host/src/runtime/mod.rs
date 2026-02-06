@@ -9,6 +9,7 @@ pub mod reactor;
 pub mod resources;
 pub mod events;
 pub mod plugin_guard;
+pub mod process;
 
 use executor::{poll_snapshot, RUNTIME};
 use reactor::{init_reactor, with_reactor};
@@ -305,4 +306,20 @@ pub extern "C" fn tau_reactor_notify() {
     with_reactor(|reactor| {
         let _ = reactor.notify();
     })
+}
+
+/// Poll the IO reactor for pending events.
+/// This is used by the host's `drive` command to progress IO tasks that aren't
+/// being waited on by `block_on`.
+pub fn poll_reactor(timeout: Option<Duration>) {
+    with_reactor(|reactor| {
+        let _ = reactor.poll(timeout);
+    })
+}
+
+/// Poll the reactor from FFI (used by plugins implementing custom event loops).
+/// millis: timeout in milliseconds.
+#[no_mangle]
+pub extern "C" fn tau_react(millis: u64) {
+    poll_reactor(Some(Duration::from_millis(millis)));
 }

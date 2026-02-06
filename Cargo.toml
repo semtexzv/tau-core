@@ -5,6 +5,7 @@ default-members = ["crates/tau-host"]
 
 [patch.crates-io]
 tau = { path = "crates/tau" }
+crossterm = { path = "vendor/crossterm" }
 
 [profile.release]
 debug = true

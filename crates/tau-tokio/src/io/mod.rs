@@ -300,6 +300,13 @@ pub trait AsyncReadExt: AsyncRead {
     {
         ReadBufFut { reader: self, buf }
     }
+
+    fn read_to_end<'a>(&'a mut self, buf: &'a mut Vec<u8>) -> ReadToEnd<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadToEnd { reader: self, buf }
+    }
 }
 
 impl<T: AsyncRead + ?Sized> AsyncReadExt for T {}
@@ -374,6 +381,41 @@ pub trait BufMut {
     fn remaining_mut(&self) -> usize;
     fn chunk_mut(&mut self) -> &mut [std::mem::MaybeUninit<u8>];
     unsafe fn advance_mut(&mut self, cnt: usize);
+}
+
+pub struct ReadToEnd<'a, R: ?Sized> {
+    reader: &'a mut R,
+    buf: &'a mut Vec<u8>,
+}
+
+impl<R: AsyncRead + Unpin + ?Sized> std::future::Future for ReadToEnd<'_, R> {
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        let start_len = this.buf.len();
+        loop {
+            if this.buf.len() == this.buf.capacity() {
+                this.buf.reserve(32);
+            }
+            let dst = this.buf.spare_capacity_mut();
+            let mut read_buf = ReadBuf::uninit(dst);
+            match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => {
+                    let filled_len = read_buf.filled().len();
+                    if filled_len == 0 {
+                        return Poll::Ready(Ok(this.buf.len() - start_len));
+                    }
+                    unsafe {
+                        let new_len = this.buf.len() + filled_len;
+                        this.buf.set_len(new_len);
+                    }
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
 }
 
 pub struct Write<'a, W: ?Sized> {

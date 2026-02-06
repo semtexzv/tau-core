@@ -1,38 +1,16 @@
 
-## Iteration 5 - US-023c: Fix dist build `libc` mismatch
+## Iteration 7 - US-025: Port TUI core
 - What was done:
-  - Identified that `tau-rt` dependency on `libc` caused E0460/resolution errors in plugin builds because of metadata mismatch.
-  - Moved SIGCHLD handling implementation from `tau-rt` to `tau-host` (`crates/tau-host/src/runtime/process.rs`).
-  - Exported `tau_host_sigchld_subscribe` from `tau-host` as a C symbol.
-  - Updated `tau-rt` to import `tau_host_sigchld_subscribe` as `extern "C"` and forward calls.
-  - Removed `libc` dependency from `crates/tau-rt/Cargo.toml`.
-  - Updated `crates/tau-rt/build.rs` to allow undefined symbols (`-undefined dynamic_lookup`) so it links against `tau-host` symbols at runtime.
-  - Verified `cargo xtask dist` and `run.sh` work correctly (plugin compiles and runs).
-  - Verified `cargo xtask test` passes (all tests green).
+  - Created `crates/tau-tui` workspace member.
+  - Ported `utils.rs` (ANSI string manipulation), `component.rs` (Component/Container), and `terminal.rs` (Terminal trait/impls) from the original codebase.
+  - Added `crossterm` to `[patch.crates-io]` in root `Cargo.toml` to ensure the workspace uses our vendored version (which exposes `mod event` unconditionally, unlike the crates.io version which requires the `events` feature).
+  - Verified all 90 tests in `tau-tui` pass.
 - Files changed:
-  - `crates/tau-rt/build.rs`
-  - `crates/tau-rt/Cargo.toml`
-  - `crates/tau-rt/src/process.rs`
-  - `crates/tau-host/src/runtime/process.rs` (new)
-  - `crates/tau-host/src/runtime/mod.rs`
+  - `Cargo.toml` (added `[patch.crates-io]` for crossterm)
+  - `crates/tau-tui/Cargo.toml`
+  - `crates/tau-tui/src/lib.rs`
+  - `crates/tau-tui/src/utils.rs`
+  - `crates/tau-tui/src/component.rs`
+  - `crates/tau-tui/src/terminal.rs`
 - Learnings for future iterations:
-  - Dylibs in Rust export their dependencies in metadata. To avoid conflicts with plugins linking their own copies of common crates (like `libc`), the dylib should minimize dependencies or hide them.
-  - Moving implementation details to the host binary (which is NOT linked by plugins, but provides symbols dynamically) is a powerful pattern to keep the shared `tau-rt` dylib clean.
-  - On macOS, `-undefined dynamic_lookup` is essential for dylibs that depend on symbols provided by the loading executable.
-
-## Iteration 6 - US-REVIEW-PHASE6: Review Process Shim
-- What was done:
-  - Reviewed US-023 through US-024 (Process Shim).
-  - Verified code in `tau-tokio`, `tau-rt`, and `tau-host`.
-  - Verified SIGCHLD centralization (US-023a/b) works as intended: host singleton pipe, rt forwarder, tokio shim subscriber.
-  - Verified no memory leaks in FfiWaker usage for callbacks.
-  - Verified proper fd lifecycle management (non-blocking setup, reactor registration, deregister/close on drop).
-  - Verified `kill_on_drop` behavior matches requirements.
-  - Verified integration test coverage.
-- Findings:
-  - Code is clean and consistent.
-  - `tau-tokio` manually implements `AsyncRead`/`AsyncWrite` for pipes instead of using `AsyncFd` (to avoid extra dependency/complexity in shim), which is acceptable.
-  - `tau-host` uses `static mut` for SIGCHLD write fd, which is standard for signal handlers (though unsafe).
-  - `FfiWaker` logic correctly handles the callback waker lifecycle.
-- Conclusion:
-  - ## Review PASSED
+  - When using vendored crates that modify API availability (e.g. enabling modules without features), `[patch.crates-io]` is required in the workspace root so that workspace members see the vendored code instead of the registry version. Relying on `dependencies` path is not enough if you want to use the version number, and `patches.list` only affects plugin compilation.

@@ -30,6 +30,10 @@ extern "C" {
 
     /// Deregister a file descriptor from the reactor.
     pub fn tau_io_deregister(handle: u64);
+
+    /// Poll the reactor for events (blocking up to timeout).
+    /// millis: timeout in milliseconds.
+    pub fn tau_react(millis: u64);
 }
 
 /// Safe wrapper: register a fd with the reactor.
@@ -56,6 +60,11 @@ pub fn clear_ready(handle: u64, direction: u8) {
 /// Safe wrapper: deregister a fd.
 pub fn deregister(handle: u64) {
     unsafe { tau_io_deregister(handle) }
+}
+
+/// Poll the reactor for events (blocking up to timeout).
+pub fn react(timeout: std::time::Duration) {
+    unsafe { tau_react(timeout.as_millis() as u64) }
 }
 
 // =============================================================================

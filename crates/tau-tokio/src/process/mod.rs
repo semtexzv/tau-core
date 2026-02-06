@@ -3,9 +3,8 @@
 //! Provides [`Command`], [`Child`], [`ChildStdin`], [`ChildStdout`], and
 //! [`ChildStderr`] backed by the tau IO reactor.
 //!
-//! Child process waiting uses a SIGCHLD self-pipe: a `pipe()` registered with
-//! the reactor. The SIGCHLD signal handler writes a byte to the pipe, waking
-//! all `Child::wait()` futures which then call `try_wait()`.
+//! Child process waiting uses the centralized SIGCHLD handler in `tau-rt`.
+//! When SIGCHLD fires, all `Child::wait()` futures are woken to call `try_wait()`.
 
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use std::ffi::OsStr;
@@ -14,111 +13,12 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::{ExitStatus, Output, Stdio};
-use std::sync::Once;
 use std::task::{Context, Poll};
 use tau::io as tio;
+use tau::process;
 
 fn debug() -> bool {
     crate::debug_enabled()
-}
-
-// =============================================================================
-// SIGCHLD self-pipe (global singleton)
-// =============================================================================
-
-/// Global SIGCHLD pipe read-end fd, registered with the tau reactor.
-static mut SIGCHLD_READ_FD: RawFd = -1;
-static mut SIGCHLD_WRITE_FD: RawFd = -1;
-static mut SIGCHLD_REACTOR_HANDLE: u64 = 0;
-static SIGCHLD_INIT: Once = Once::new();
-
-/// Initialize the SIGCHLD self-pipe and signal handler.
-/// Safe to call multiple times — only runs once.
-fn ensure_sigchld_handler() {
-    SIGCHLD_INIT.call_once(|| {
-        // Create non-blocking pipe
-        let mut fds = [0 as libc::c_int; 2];
-        let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(ret, 0, "pipe() failed");
-
-        let read_fd = fds[0];
-        let write_fd = fds[1];
-
-        // Set both ends non-blocking
-        unsafe {
-            let flags = libc::fcntl(read_fd, libc::F_GETFL);
-            libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            let flags = libc::fcntl(write_fd, libc::F_GETFL);
-            libc::fcntl(write_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-
-        // Register read end with reactor
-        let handle = tio::register(read_fd, tio::READABLE)
-            .expect("failed to register SIGCHLD pipe with reactor");
-
-        unsafe {
-            SIGCHLD_READ_FD = read_fd;
-            SIGCHLD_WRITE_FD = write_fd;
-            SIGCHLD_REACTOR_HANDLE = handle;
-        }
-
-        // Install SIGCHLD handler
-        unsafe {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = sigchld_handler as usize;
-            sa.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
-            libc::sigemptyset(&mut sa.sa_mask);
-            libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut());
-        }
-
-        if debug() {
-            eprintln!(
-                "[process] SIGCHLD handler installed: read_fd={}, write_fd={}, handle={}",
-                read_fd, write_fd, handle
-            );
-        }
-    });
-}
-
-/// Signal handler — writes a byte to the self-pipe. Must be async-signal-safe.
-extern "C" fn sigchld_handler(_sig: libc::c_int) {
-    let fd = unsafe { SIGCHLD_WRITE_FD };
-    if fd >= 0 {
-        let buf: [u8; 1] = [1];
-        // write() is async-signal-safe per POSIX
-        unsafe {
-            libc::write(fd, buf.as_ptr() as *const libc::c_void, 1);
-        }
-    }
-}
-
-/// Drain the SIGCHLD pipe (read all pending bytes).
-fn drain_sigchld_pipe() {
-    let fd = unsafe { SIGCHLD_READ_FD };
-    if fd < 0 {
-        return;
-    }
-    let mut buf = [0u8; 64];
-    loop {
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n <= 0 {
-            break;
-        }
-    }
-}
-
-/// Poll the SIGCHLD pipe for readability via the reactor.
-fn poll_sigchld(cx: &mut Context<'_>) -> Poll<()> {
-    let handle = unsafe { SIGCHLD_REACTOR_HANDLE };
-    let ffi_waker = tio::make_ffi_waker(cx);
-    if tio::poll_ready(handle, tio::DIR_READ, ffi_waker) {
-        // Drain the pipe and clear readiness so we get notified again
-        drain_sigchld_pipe();
-        tio::clear_ready(handle, tio::DIR_READ);
-        Poll::Ready(())
-    } else {
-        Poll::Pending
-    }
 }
 
 // =============================================================================
@@ -269,8 +169,6 @@ impl Command {
     /// This is **synchronous** — it calls `std::process::Command::spawn()`.
     /// The async part is waiting for exit and reading pipes.
     pub fn spawn(&mut self) -> io::Result<Child> {
-        ensure_sigchld_handler();
-
         let mut child = self.inner.spawn()?;
 
         if debug() {
@@ -486,22 +384,11 @@ impl<'a> std::future::Future for WaitFuture<'a> {
             Err(e) => return Poll::Ready(Err(e)),
         }
 
-        // Not exited yet — register with SIGCHLD pipe via reactor
-        match poll_sigchld(cx) {
-            Poll::Ready(()) => {
-                // SIGCHLD received — try again
-                match this.child.try_wait() {
-                    Ok(Some(status)) => Poll::Ready(Ok(status)),
-                    Ok(None) => {
-                        // Not our child — re-register waker
-                        // We need to poll again on next SIGCHLD
-                        Poll::Pending
-                    }
-                    Err(e) => Poll::Ready(Err(e)),
-                }
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        // Not exited yet — register with centralized SIGCHLD handler
+        let ffi_waker = tio::make_ffi_waker(cx);
+        process::tau_sys_sigchld_subscribe(ffi_waker);
+
+        Poll::Pending
     }
 }
 

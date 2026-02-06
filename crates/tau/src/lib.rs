@@ -79,3 +79,4 @@ pub use rt::types;
 pub use rt::io;
 pub use rt::resource;
 pub use rt::event;
+pub use rt::process;

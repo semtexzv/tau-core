@@ -968,7 +968,7 @@ To fix this, we must centralize SIGCHLD handling in the shared `tau-rt` dylib.
 
 ---
 
-### US-025: Port TUI core — `Component`, `Container`, `Terminal` traits [ ]
+### US-025: Port TUI core — `Component`, `Container`, `Terminal` traits [x]
 
 **Description:** As a plugin developer, I want the TUI component system available in tau-core so I can build terminal interfaces.
 
@@ -980,13 +980,13 @@ To fix this, we must centralize SIGCHLD handling in the shared `tau-rt` dylib.
 > - Key: `CrosstermTerminal` depends on `crossterm` which we vendor (Phase 5, `patches.list`). The TUI crate should depend on `crossterm = "0.28"` and the patch system handles the rest.
 
 **Acceptance Criteria:**
-- [ ] Create `crates/tau-tui/` as a new workspace member (rlib, NOT in `patches.list` — it's a regular dependency plugins opt into)
-- [ ] Port `component.rs` — `Component` trait, `Container` struct
-- [ ] Port `terminal.rs` — `Terminal` trait, `CrosstermTerminal`, `MockTerminal`
-- [ ] Port `utils.rs` — `visible_width()`, `truncate_to_width()`, `slice_from_column()` and related ANSI string utilities
-- [ ] All existing tests from `~/tau/crates/tau-tui/` pass
-- [ ] `cargo build` succeeds for the workspace
-- [ ] `cargo test -p tau-tui` passes
+- [x] Create `crates/tau-tui/` as a new workspace member (rlib, NOT in `patches.list` — it's a regular dependency plugins opt into)
+- [x] Port `component.rs` — `Component` trait, `Container` struct
+- [x] Port `terminal.rs` — `Terminal` trait, `CrosstermTerminal`, `MockTerminal`
+- [x] Port `utils.rs` — `visible_width()`, `truncate_to_width()`, `slice_from_column()` and related ANSI string utilities
+- [x] All existing tests from `~/tau/crates/tau-tui/` pass
+- [x] `cargo build` succeeds for the workspace
+- [x] `cargo test -p tau-tui` passes
 
 ---
 

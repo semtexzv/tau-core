@@ -13,7 +13,7 @@ use compiler::{Compiler, ResolvedPatches};
 use serde::{Deserialize, Serialize};
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // =============================================================================
 // Message type (shared protocol with plugins)
@@ -579,6 +579,11 @@ fn run_test_mode(host: &Host) {
                 let cycles: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                 for _ in 0..cycles {
                     runtime::tau_drive();
+                    // Poll reactor to process IO (e.g. timers, sockets, pipes)
+                    // Short timeout to yield to OS
+                    runtime::poll_reactor(Some(Duration::from_millis(1)));
+                    // Sleep a bit to prevent busy loop if reactor returns immediately (phantom events)
+                    std::thread::sleep(Duration::from_millis(1));
                 }
             }
 

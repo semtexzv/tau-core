@@ -1,0 +1,254 @@
+[Host] Compiler detected
+[Compiler] Using prebuilt tau-rt: "/Users/semtexzv/tau-core/dist/lib/libtau_rt.dylib"
+[Compiler] Patching tau → "/Users/semtexzv/tau-core/dist/src/tau"
+[Compiler] Patching tokio → "/Users/semtexzv/tau-core/dist/src/tokio"
+[Compiler] Patching crossterm → "/Users/semtexzv/tau-core/dist/src/crossterm"
+[Compiler] Building plugin in "/Users/semtexzv/tau-core/plugins/process-test-plugin" (debug)
+COMPILE_FAIL: Compilation failed:
+
+warning: patch `crossterm v0.28.0 (/Users/semtexzv/tau-core/dist/src/crossterm)` was not used in the crate graph
+help: Check that the patched package version and available features are compatible
+      with the dependency requirements. If the patch has a different version from
+      what is locked in the Cargo.lock file, run `cargo update` to use the new
+      version. This may also occur with an optional dependency that is not enabled.
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.22
+   Compiling quote v1.0.44
+   Compiling libc v0.2.180
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.19
+   Compiling serde v1.0.228
+   Compiling futures-core v0.3.31
+   Compiling tokio v1.99.0 (/Users/semtexzv/tau-core/dist/src/tokio)
+   Compiling pin-project-lite v0.2.16
+   Compiling serde_json v1.0.149
+   Compiling itoa v1.0.17
+   Compiling memchr v2.7.6
+warning: unknown feature specified for `-Ctarget-feature`: `aes`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `crc`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `dit`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `dotprod`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `dpb`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `dpb2`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `fcma`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `fhm`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `flagm`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `flagm2`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `fp16`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `frintts`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `jsconv`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `lor`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `lse`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `lse2`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `neon`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `paca`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `pacg`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `pan`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `pmuv3`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `ras`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `rcpc`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `rcpc2`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `rdm`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `sb`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `sha2`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `sha3`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `ssbs`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `v8.1a`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `v8.2a`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `v8.3a`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `v8.4a`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+warning: unknown feature specified for `-Ctarget-feature`: `vh`
+  |
+  = note: features must begin with a `+` to enable or `-` to disable it
+
+   Compiling tau v0.1.0 (/Users/semtexzv/tau-core/dist/src/tau)
+warning: `tokio` (build script) generated 34 warnings
+error[E0463]: can't find crate for `tau_rt`
+  --> /Users/semtexzv/tau-core/dist/src/tau/src/lib.rs:48:13
+   |
+48 |     pub use tau_rt::*;
+   |             ^^^^^^ can't find crate
+
+error[E0432]: unresolved imports `rt::spawn`, `rt::sleep`, `rt::block_on`, `rt::drive`, `rt::init`, `rt::JoinHandle`, `rt::SleepFuture`
+  --> /Users/semtexzv/tau-core/dist/src/tau/src/lib.rs:72:14
+   |
+72 | pub use rt::{spawn, sleep, block_on, drive, init, JoinHandle, SleepFuture};
+   |              ^^^^^  ^^^^^  ^^^^^^^^  ^^^^^  ^^^^  ^^^^^^^^^^  ^^^^^^^^^^^ no `SleepFuture` in `rt`
+   |              |      |      |         |      |     |
+   |              |      |      |         |      |     no `JoinHandle` in `rt`
+   |              |      |      |         |      no `init` in `rt`
+   |              |      |      |         no `drive` in `rt`
+   |              |      |      no `block_on` in `rt`
+   |              |      no `sleep` in `rt`
+   |              no `spawn` in `rt`
+   |
+   = help: consider importing this struct instead:
+           std::thread::JoinHandle
+
+error[E0432]: unresolved import `rt::types`
+  --> /Users/semtexzv/tau-core/dist/src/tau/src/lib.rs:78:9
+   |
+78 | pub use rt::types;
+   |         ^^^^^^^^^ no `types` in `rt`
+
+error[E0432]: unresolved import `rt::io`
+  --> /Users/semtexzv/tau-core/dist/src/tau/src/lib.rs:79:9
+   |
+79 | pub use rt::io;
+   |         ^^^^^^ no `io` in `rt`
+   |
+help: consider importing one of these modules instead
+   |
+79 - pub use rt::io;
+79 + pub use std::io;
+   |
+79 - pub use rt::io;
+79 + pub use std::os::unix::io;
+   |
+79 - pub use rt::io;
+79 + pub use core::io;
+   |
+
+error[E0432]: unresolved import `rt::resource`
+  --> /Users/semtexzv/tau-core/dist/src/tau/src/lib.rs:80:9
+   |
+80 | pub use rt::resource;
+   |         ^^^^^^^^^^^^ no `resource` in `rt`
+
+error[E0432]: unresolved import `rt::event`
+  --> /Users/semtexzv/tau-core/dist/src/tau/src/lib.rs:81:9
+   |
+81 | pub use rt::event;
+   |         ^^^^^^^^^ no `event` in `rt`
+
+error[E0432]: unresolved import `rt::process`
+  --> /Users/semtexzv/tau-core/dist/src/tau/src/lib.rs:82:9
+   |
+82 | pub use rt::process;
+   |         ^^^^^^^^^^^ no `process` in `rt`
+   |
+help: consider importing one of these modules instead
+   |
+82 - pub use rt::process;
+82 + pub use std::os::unix::process;
+   |
+82 - pub use rt::process;
+82 + pub use std::process;
+   |
+
+Some errors have detailed explanations: E0432, E0463.
+For more information about an error, try `rustc --explain E0432`.
+warning: `tau` (lib) generated 34 warnings (34 duplicates)
+error: could not compile `tau` (lib) due to 7 previous errors; 34 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+
+NOT_FOUND: p1
+NOT_FOUND: p1
+NOT_FOUND: p1
+NOT_FOUND: p1
+NOT_FOUND: p1
+Unknown command: exit
+
+=== Test Results ===
+Tests:  0
+Passed: 0
+Failed: 0

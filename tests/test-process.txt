@@ -1,0 +1,9 @@
+load p1 plugins/process-test-plugin
+send p1 run-echo
+drive 500
+send p1 check
+send p1 pipe-cat
+drive 500
+send p1 check
+unload p1
+exit
