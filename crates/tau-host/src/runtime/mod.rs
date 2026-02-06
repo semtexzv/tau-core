@@ -138,6 +138,19 @@ pub extern "C" fn tau_block_on(task_id: u64) {
 }
 
 // =============================================================================
+// Task abort export
+// =============================================================================
+
+/// Abort a task by ID. Returns 1 if the task was found and aborted, 0 otherwise.
+/// Safe to call from within a task's poll (the future drop is deferred).
+#[no_mangle]
+pub extern "C" fn tau_task_abort(task_id: u64) -> u8 {
+    RUNTIME.with(|rt| {
+        if rt.borrow_mut().abort_task(task_id) { 1 } else { 0 }
+    })
+}
+
+// =============================================================================
 // Plugin ID export (used by tau::resource and tau::event)
 // =============================================================================
 

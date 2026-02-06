@@ -51,7 +51,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-001: Add `tau_task_abort` FFI export to the host executor [ ]
+### US-001: Add `tau_task_abort` FFI export to the host executor [x]
 
 **Description:** As a plugin developer, I want to abort a spawned task so that its future is dropped and resources are freed.
 
@@ -62,14 +62,14 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key concern: what if `abort()` is called while the task is currently being polled? In tokio, the task is NOT dropped mid-poll — the abort flag is checked after `poll()` returns. Our single-threaded runtime has the same constraint: if task A's poll calls `task_B.abort()`, task B's future must not be dropped until after A's poll returns and the drive loop checks B.
 
 **Acceptance Criteria:**
-- [ ] Add `aborted: bool` flag to the `Task` struct in `crates/tau-host/src/runtime/executor.rs`
-- [ ] Add `pub fn abort_task(&mut self, task_id: u64) -> bool` method on `Runtime` that sets the `aborted` flag and returns whether the task existed
-- [ ] Add `#[no_mangle] pub extern "C" fn tau_task_abort(task_id: u64) -> u8` in `crates/tau-host/src/runtime/mod.rs` that calls `rt.borrow_mut().abort_task(task_id)`, returns 1 if found, 0 if not
-- [ ] Aborted tasks are removed from `ready_queue` immediately
-- [ ] Aborted tasks' futures are dropped (the existing `Task::drop` calls `(drop_fn)(future_ptr)`) during the next `cleanup_completed()` or immediately
-- [ ] Associated timers for aborted tasks are cleaned up
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests (`cargo xtask test`) still pass
+- [x] Add `aborted: bool` flag to the `Task` struct in `crates/tau-host/src/runtime/executor.rs`
+- [x] Add `pub fn abort_task(&mut self, task_id: u64) -> bool` method on `Runtime` that sets the `aborted` flag and returns whether the task existed
+- [x] Add `#[no_mangle] pub extern "C" fn tau_task_abort(task_id: u64) -> u8` in `crates/tau-host/src/runtime/mod.rs` that calls `rt.borrow_mut().abort_task(task_id)`, returns 1 if found, 0 if not
+- [x] Aborted tasks are removed from `ready_queue` immediately
+- [x] Aborted tasks' futures are dropped (the existing `Task::drop` calls `(drop_fn)(future_ptr)`) during the next `cleanup_completed()` or immediately
+- [x] Associated timers for aborted tasks are cleaned up
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests (`cargo xtask test`) still pass
 
 ---
 

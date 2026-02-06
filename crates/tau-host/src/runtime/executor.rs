@@ -124,6 +124,7 @@ struct Task {
     poll_fn: RawPollFn,
     drop_fn: RawDropFn,
     completed: bool,
+    aborted: bool,
     plugin_id: u64,  // Which plugin owns this task (0 = host)
 }
 
@@ -206,6 +207,7 @@ impl Runtime {
             poll_fn,
             drop_fn,
             completed: false,
+            aborted: false,
             plugin_id,
         };
 
@@ -305,6 +307,39 @@ impl Runtime {
             task.completed = true;
             rt_debug!("completed task_id={}", task_id);
         }
+    }
+
+    /// Abort a task: mark it aborted, remove from ready queue, clean up timers.
+    /// The future is NOT dropped immediately — it is deferred to `cleanup_completed()`
+    /// so that self-abort (a task aborting itself during its own poll) is safe.
+    /// Returns true if the task existed and was aborted.
+    pub fn abort_task(&mut self, task_id: u64) -> bool {
+        let task = match self.tasks.get_mut(&task_id) {
+            Some(t) if !t.completed && !t.aborted => t,
+            _ => return false,
+        };
+
+        task.aborted = true;
+        task.completed = true;
+        rt_debug!("abort task_id={} plugin_id={}", task_id, task.plugin_id);
+
+        // Remove from ready queue
+        self.ready_queue.retain(|id| *id != task_id);
+
+        // Clean up timers associated with this task
+        let timer_keys: Vec<_> = self.timers
+            .iter()
+            .filter(|(_, entry)| entry.task_id == task_id)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in timer_keys {
+            self.timers.remove(&key);
+        }
+
+        // Future drop is deferred to cleanup_completed() — safe even if
+        // this task is currently being polled (self-abort scenario).
+
+        true
     }
 
     /// Remove a completed task.
