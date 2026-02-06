@@ -12,6 +12,9 @@
 pub mod combinators;
 pub mod consumers;
 
+#[cfg(test)]
+mod tests;
+
 pub use futures_core::Stream;
 pub use combinators::{Map, Filter, FilterMap, TakeWhile, Then, Merge};
 pub use consumers::{Next, Collect, ForEach, Fold};

@@ -324,3 +324,23 @@
   - Collect uses `core::mem::take` to move the Default-able collection out on completion
 ---
 ## Task self-review PASSED
+
+## Iteration 7 - US-012: merge — combine two streams into one
+- What was done:
+  - Added `Merge<A, B>` combinator struct to `crates/tau/src/stream/combinators.rs`
+  - Fairness via `poll_a_first: bool` toggle — alternates which stream is polled first each call
+  - Extracted `poll_stream()` helper for clean code — polls one stream, updates done flag
+  - Completes only when both streams exhausted (a_done && b_done)
+  - Added `merge()` method to `StreamExt` trait
+  - 5 unit tests: both streams, one empty, both empty, fairness alternation, size_hint
+  - All 27 workspace tests pass (25 tau + 2 tau-host)
+- Files changed:
+  - `crates/tau/src/stream/combinators.rs` — added Merge struct, poll_stream helper, 5 tests
+  - `crates/tau/src/stream/mod.rs` — added merge() to StreamExt, exported Merge
+  - `PRD.md` — marked US-012 complete
+- Learnings for future iterations:
+  - Doc comments with em-dash (—) inside `pin_project!` macro cause parse errors — use regular comments instead
+  - The `poll_stream` helper pattern is reusable for any combinator that needs to poll multiple sub-streams
+  - VecStream test helper with ptr::read + custom Drop is needed for owned item streams in tests
+## Task self-review PASSED
+---

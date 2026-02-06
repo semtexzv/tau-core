@@ -367,12 +367,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-013: Stream combinator tests [ ]
+### US-013: Stream combinator tests [x]
 
 **Description:** As a developer, I want tests for all combinators to verify correctness.
 
 **Acceptance Criteria:**
-- [ ] Create `plugins/stream-combinator-test-plugin/` (or extend `stream-test-plugin`) that tests:
+- [x] Create `plugins/stream-combinator-test-plugin/` (or extend `stream-test-plugin`) that tests:
   - `map`: transform items, verify output sequence
   - `filter`: drop items, verify only matching items pass through
   - `filter_map`: combined filter+transform
@@ -381,9 +381,9 @@ All primitives must integrate with the existing tokio shim so that crates like `
   - `next`: consume one item
   - `collect`: gather into `Vec`
   - `merge`: two producers, verify all items received
-- [ ] Test is runnable via `cargo xtask test` or manual invocation
-- [ ] All sub-tests pass
-- [ ] `cargo build` succeeds for the workspace
+- [x] Test is runnable via `cargo xtask test` or manual invocation
+- [x] All sub-tests pass
+- [x] `cargo build` succeeds for the workspace
 
 ---
 
