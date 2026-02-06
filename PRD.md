@@ -304,7 +304,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-010: Async combinator — `then` (async map) [ ]
+### US-010: Async combinator — `then` (async map) [x]
 
 **Description:** As a plugin developer, I want an async transform on streams so I can do async work (HTTP calls, DB queries, LLM calls) per stream item.
 
@@ -315,12 +315,12 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Also study `and_then` in futures-rs — similar but for `Stream<Item = Result<T, E>>` where the async closure returns `Result`. We may want this later for error chains.
 
 **Acceptance Criteria:**
-- [ ] Add `fn then<F, Fut>(self, f: F) -> Then<Self, F, Fut>` to `StreamExt` where `F: FnMut(Self::Item) -> Fut`, `Fut: Future`
-- [ ] `Then` struct holds the source stream and an `Option<Fut>` for the in-flight future
-- [ ] Polling: if a future is in flight, poll it; if ready yield the result and poll the source for the next item; if source yields, create a new future via `f(item)` and poll it
-- [ ] Only one item is in-flight at a time (sequential async processing, not concurrent)
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Add `fn then<F, Fut>(self, f: F) -> Then<Self, F, Fut>` to `StreamExt` where `F: FnMut(Self::Item) -> Fut`, `Fut: Future`
+- [x] `Then` struct holds the source stream and an `Option<Fut>` for the in-flight future
+- [x] Polling: if a future is in flight, poll it; if ready yield the result and poll the source for the next item; if source yields, create a new future via `f(item)` and poll it
+- [x] Only one item is in-flight at a time (sequential async processing, not concurrent)
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

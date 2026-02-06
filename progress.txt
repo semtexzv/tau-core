@@ -260,3 +260,28 @@
   - The `tau::stream` module is the right place for future combinator additions (US-009+)
   - Single version of futures-core confirmed — no diamond dependency issues
 ---
+
+## Iteration 4 - US-009: Synchronous combinators — map, filter, filter_map, take_while
+- What was done:
+  - Added `pin-project-lite = "0.2"` to `crates/tau/Cargo.toml`
+  - Converted `crates/tau/src/stream.rs` to `crates/tau/src/stream/mod.rs` (module directory)
+  - Created `crates/tau/src/stream/combinators.rs` with 4 combinator structs: Map, Filter, FilterMap, TakeWhile
+  - Created `StreamExt` trait in `mod.rs` with blanket impl for all `Stream + Sized`
+  - Each combinator uses `pin_project_lite::pin_project!` for safe pin projections
+  - Filter/FilterMap loop to skip non-matching items (canonical pattern from futures-util)
+  - TakeWhile has `done: bool` flag for permanent stream termination
+  - All combinators provide correct `size_hint` implementations
+  - All 22 tests pass, build succeeds
+- Files changed:
+  - `crates/tau/Cargo.toml` — added pin-project-lite dependency
+  - `crates/tau/src/stream.rs` → `crates/tau/src/stream/mod.rs` — converted to module, added StreamExt trait
+  - `crates/tau/src/stream/combinators.rs` — new file with Map, Filter, FilterMap, TakeWhile
+  - `PRD.md` — marked US-009 acceptance criteria and header complete
+- Learnings for future iterations:
+  - Sync combinators are much simpler than async ones — no pending_fut/pending_item state needed
+  - `pin_project_lite::pin_project!` handles Send auto-derivation correctly — no manual impl needed
+  - The `pub(super)` constructor pattern keeps combinator creation gated through StreamExt methods
+  - Future async combinators (US-010 `then`) will need `#[pin] pending: Option<Fut>` for in-flight futures
+  - `stream/` is now a module directory — future files (e.g., US-010 Then struct) can be added as separate files or in combinators.rs
+---
+## Task self-review PASSED

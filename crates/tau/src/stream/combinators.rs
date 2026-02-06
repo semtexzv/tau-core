@@ -2,9 +2,12 @@
 //!
 //! Each struct wraps a source stream and a closure, implementing
 //! [`Stream`](futures_core::Stream) with the appropriate transformation.
-//! All combinators in this module are **synchronous** — the closures are
-//! plain `FnMut`, not async.
+//!
+//! **Synchronous** combinators (`Map`, `Filter`, `FilterMap`, `TakeWhile`)
+//! use plain `FnMut` closures. **Async** combinators (`Then`) take closures
+//! that return futures.
 
+use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use futures_core::Stream;
@@ -214,6 +217,87 @@ where
         } else {
             let (_, upper) = self.stream.size_hint();
             (0, upper)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Then (async map)
+// ---------------------------------------------------------------------------
+
+pin_project! {
+    /// Stream adapter that applies an async function to every item.
+    ///
+    /// Only one future is in-flight at a time (sequential async processing).
+    ///
+    /// Created by [`StreamExt::then`](super::StreamExt::then).
+    #[must_use = "streams do nothing unless polled"]
+    pub struct Then<St, F, Fut> {
+        #[pin]
+        stream: St,
+        f: F,
+        #[pin]
+        pending: Option<Fut>,
+    }
+}
+
+impl<St, F, Fut> Then<St, F, Fut> {
+    pub(super) fn new(stream: St, f: F) -> Self {
+        Self { stream, f, pending: None }
+    }
+}
+
+impl<St, F, Fut> Stream for Then<St, F, Fut>
+where
+    St: Stream,
+    F: FnMut(St::Item) -> Fut,
+    Fut: Future,
+{
+    type Item = Fut::Output;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Fut::Output>> {
+        let mut this = self.project();
+
+        // If a future is in-flight, poll it first.
+        if let Some(fut) = this.pending.as_mut().as_pin_mut() {
+            match fut.poll(cx) {
+                Poll::Ready(output) => {
+                    this.pending.set(None);
+                    return Poll::Ready(Some(output));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // No future in-flight — poll the source stream.
+        match this.stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                let fut = (this.f)(item);
+                this.pending.set(Some(fut));
+                // Poll the newly created future immediately.
+                // SAFETY: we just set pending to Some, so as_pin_mut() is Some.
+                match this.pending.as_mut().as_pin_mut().unwrap().poll(cx) {
+                    Poll::Ready(output) => {
+                        this.pending.set(None);
+                        Poll::Ready(Some(output))
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let hint = self.stream.size_hint();
+        if self.pending.is_some() {
+            // One extra item is in-flight.
+            let lo = hint.0.saturating_add(1);
+            let hi = hint.1.map(|h| h.saturating_add(1));
+            (lo, hi)
+        } else {
+            hint
         }
     }
 }
