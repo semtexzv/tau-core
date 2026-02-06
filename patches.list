@@ -10,5 +10,4 @@
 # redirects that to the local source at build time.
 
 tau     = crates/tau
-tau-rt  = crates/tau-rt
 tokio   = crates/tau-tokio

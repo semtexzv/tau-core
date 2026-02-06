@@ -120,6 +120,17 @@ cargo xtask dist 2>&1 | grep "src/"
 
 Both must list the same set of crate names.
 
+## Important: Always Run Plugins via `dist`
+
+**Plugins must be compiled and run through the dist build, not directly via `cargo run`.**
+
+```bash
+cargo xtask dist
+./dist/run.sh --plugin plugins/example-plugin
+```
+
+Running `cargo run -- --plugin ...` from the workspace will fail because the workspace `target/debug/` contains its own `libtau_rt.dylib`, which conflicts with the one built in the plugin build cache. The dist layout isolates `libtau_rt.dylib` into `dist/lib/` and provides it to plugins via `--extern`, avoiding duplicate dylib candidates.
+
 ## Common Pitfalls
 
 ### Adding a new patchable crate

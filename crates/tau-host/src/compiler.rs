@@ -508,12 +508,12 @@ mod tests {
     #[test]
     fn test_parse_patches() {
         let patches = parse_patches();
-        assert!(patches.len() >= 3, "Expected at least 3 patches, got {}", patches.len());
+        assert!(patches.len() >= 2, "Expected at least 2 patches, got {}", patches.len());
 
         let names: Vec<&str> = patches.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tau"), "Missing tau patch");
-        assert!(names.contains(&"tau-rt"), "Missing tau-rt patch");
         assert!(names.contains(&"tokio"), "Missing tokio patch");
+        // tau-rt is NOT patched — it's always provided as a prebuilt dylib via --extern
 
         for e in &patches {
             println!("  {} → {}", e.name, e.rel_path);

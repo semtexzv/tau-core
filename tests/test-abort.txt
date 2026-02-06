@@ -1,0 +1,35 @@
+# =====================================================
+# Test: Task abort works end-to-end across FFI
+# =====================================================
+print Test: Abort idle task — future is dropped, handle reports finished
+
+load abort plugins/abort-test-plugin
+
+# Spawn a long-running task (sleeps 60s)
+send abort spawn
+
+# Small delay to let the spawned task start and enter sleep
+sleep 50
+
+# Abort the task
+send abort abort
+
+# Check that the task is now finished and its Drop ran
+send abort check
+
+# =====================================================
+# Test: Abort already-completed task is a no-op
+# =====================================================
+print Test: Abort already-completed task is a no-op
+
+# Spawn a task that completes immediately
+send abort spawn-and-complete
+
+# Give it time to finish
+sleep 50
+
+# Abort should be a no-op (task already completed/removed)
+send abort abort-completed
+
+# Cleanup
+unload abort
