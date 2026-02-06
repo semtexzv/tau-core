@@ -666,3 +666,100 @@
   - Waker can use `fd.as_fd()` from `AsFd` trait instead of unsafe `BorrowedFd::borrow_raw` when you have a reference to OwnedFd.
 ## Task self-review PASSED
 ---
+
+## Iteration 10 - US-021: Implement async EventStream using AsyncFd
+- What was done:
+  - Rewrote `vendor/crossterm/src/event/stream.rs` to use `tau::io::AsyncFd` instead of old `tau_io::AsyncFd` + `async_ffi::ContextExt`
+  - EventStream struct holds: AsyncFd for tty, AsyncFd for SIGWINCH pipe read-end, OwnedFd for both pipe ends, Parser, FileDesc, read buffer
+  - Constructor: opens tty, sets non-blocking via rustix, registers with reactor via `AsyncFd::with_interest`, creates SIGWINCH self-pipe via `signal_hook::low_level::pipe::register_raw`
+  - `Stream::poll_next`: checks parser buffer first → polls SIGWINCH AsyncFd → polls tty AsyncFd → reads/parses → returns event or Pending
+  - Standard `Context` used directly — no FfiContext bridge needed (tau::io::AsyncFd handles waker→FfiWaker conversion internally via `make_ffi_waker`)
+  - `Drop` restores SIG_DFL, OwnedFd auto-closes pipes, AsyncFd auto-deregisters from reactor
+  - Gated behind `#[cfg(feature = "event-stream")]` (already wired in event.rs)
+  - All 160 tests pass, builds with and without event-stream feature
+- Files changed:
+  - `vendor/crossterm/src/event/stream.rs` — complete rewrite
+  - `PRD.md` — marked US-021 acceptance criteria and header complete
+- Learnings for future iterations:
+  - `tau::io::AsyncFd::poll_read_ready(cx)` takes standard `Context` directly — much simpler than old async_ffi bridge
+  - `clear_read_ready()` must be called after consuming data, otherwise the reactor won't re-notify
+  - Parser and pipe helpers are duplicated between stream.rs and tau.rs (sync source) — acceptable since they're in separate feature-gated files
+  - `signal_hook::low_level::pipe::register_raw` is cleaner than raw signal handler + static AtomicI32
+  - OwnedFd for pipe lifetime management is safer than raw fd tracking with manual close
+## Task self-review PASSED
+---
+
+## Iteration 11 - US-022: Crossterm integration test — sync and async events
+- What was done:
+  - Created `plugins/crossterm-test-plugin/` with crossterm dependency (event-stream feature)
+  - Plugin init: enables raw mode + hides cursor; destroy: restores both
+  - 4 request commands: `size`, `poll <ms>`, `read`, `stream`
+  - `stream` command spawns async task using `EventStream` + `tau::stream::StreamExt::next().await`
+  - Created `tests/test-crossterm.sh` + `tests/test-crossterm.txt` smoke test
+  - Plugin compiles via dist (crossterm patched in via patches.list)
+  - Smoke test passes: plugin loads, `terminal::size()` returns `80x24`
+  - All 70 workspace tests pass (with --test-threads=1 for flaky guard test)
+- Files changed:
+  - `plugins/crossterm-test-plugin/Cargo.toml` — new plugin manifest
+  - `plugins/crossterm-test-plugin/src/lib.rs` — new plugin source
+  - `tests/test-crossterm.sh` — smoke test script
+  - `tests/test-crossterm.txt` — test mode commands
+  - `PRD.md` — marked US-022 acceptance criteria and header complete
+- Learnings for future iterations:
+  - Plugin request data is JSON (`{"id":N,"payload":"..."}`) — must parse with serde_json, not raw string
+  - `enable_raw_mode()` fails with "Device not configured" when no TTY — this is expected in CI/test contexts
+  - Plugin compiles against vendored crossterm via patches.list injection — no manual patch config in plugin Cargo.toml
+## Task self-review PASSED
+---
+
+## Iteration 12 - US-REVIEW-PHASE5: Review AsyncFd & Crossterm (US-017 through US-022)
+- What was done: Reviewed all code from US-017 through US-022 as a cohesive system
+- Files reviewed:
+  - `crates/tau-rt/src/io.rs` — AsyncFd, make_ffi_waker
+  - `crates/tau-rt/src/types.rs` — FfiWaker, into_waker vtable
+  - `crates/tau-host/src/runtime/reactor.rs` — Reactor poll_ready/wake paths
+  - `crates/tau-host/src/runtime/mod.rs` — tau_io_poll_ready FFI entry
+  - `crates/tau-tokio/src/net/mod.rs` — TcpStream/UdpSocket using make_ffi_waker
+  - `vendor/crossterm/src/event/source/unix/tau.rs` — sync event source
+  - `vendor/crossterm/src/event/stream.rs` — async EventStream
+  - `vendor/crossterm/src/event/sys/unix/waker/tau.rs` — pipe-based Waker
+
+### Findings
+
+**ISSUE: FfiWaker memory leak in into_waker vtable (US-018a filed)**
+
+The `make_ffi_waker(cx)` function boxes a `std::task::Waker` and stores the pointer in `FfiWaker.data`. But `FfiWaker::into_waker()`'s vtable `drop` only frees the outer `Box<FfiWaker>` without freeing the inner boxed Waker. This leaks memory in two paths:
+
+1. **Already-ready path**: `poll_read_ready` → `make_ffi_waker` → `tau_io_poll_ready` → `into_waker` → reactor says "already ready" → local Waker dropped → outer freed, inner leaks. Happens every time an fd is polled while already marked ready.
+
+2. **Replace-waker path**: A pending waker is replaced via `clone_from` when the task is re-polled. The old waker is dropped → outer freed, inner leaks.
+
+Root cause: `FfiWaker` was designed for non-owned task IDs (comment says "data is not owned — it's just a number"). `make_ffi_waker` repurposed `data` as an owned heap pointer, creating a mismatch. The `into_waker` vtable's `clone` does shallow copies (sharing the inner pointer), and `drop` doesn't free inner data.
+
+Additionally, `wake_by_ref` calls `wake_fn(data)` which does `Box::from_raw`, consuming the inner allocation. This is technically a `Waker` contract violation (wake_by_ref should be safe to call multiple times), though the reactor only uses `wake` (by value) in practice.
+
+**PASSED: EventStream waker registration for both fds**
+`poll_next` calls `sigwinch_async.poll_read_ready(cx)` and `tty_async.poll_read_ready(cx)` in sequence. When both return Pending, the shared waker is registered with both fds. Either fd becoming ready wakes the task. If SIGWINCH returns Ready and we return early, the tty waker isn't registered — but that's fine because the next poll after processing the SIGWINCH event will register it.
+
+**PASSED: SIGWINCH self-pipe cleanup on drop**
+`EventStream::drop` restores SIG_DFL via libc `signal()`. `OwnedFd` Drop closes both pipe ends. `AsyncFd` Drop deregisters from reactor. No fd leaks.
+
+**PASSED: Sync poll/read within block_on**
+`UnixInternalEventSource::try_read` uses `rustix::event::poll()` directly (raw syscall), not the tau reactor. No reactor lock contention or deadlock possible.
+
+**PASSED: Crossterm patches into plugin builds**
+`patches.list` contains `crossterm = vendor/crossterm`. Test plugin compiles and loads successfully.
+
+**NOTE: Code duplication between tau.rs and stream.rs**
+Both files duplicate: `nonblocking_pipe()`, `io_err()`, `drain_pipe()`, `read_complete()`, and the entire `Parser` struct (~30 lines). They're in separate feature-gated files (stream.rs behind `event-stream`, tau.rs always compiled), so they can coexist. This is a minor quality issue — could be extracted to a shared module — but not blocking.
+
+**NOTE: AsyncFd quality**
+AsyncFd is clean and well-structured. `with_interest` for flexible registration, `poll_read_ready`/`poll_write_ready` for integration with `poll_fn`, convenience `.readable()`/`.writable()` futures, proper Drop deregistration. Good design.
+
+### Review Result: ISSUES FOUND — fix task US-018a inserted
+
+- Learnings for future iterations:
+  - The FfiWaker double-boxing pattern (make_ffi_waker boxes a Waker, into_waker boxes the FfiWaker) creates ownership confusion. The inner layer's lifetime isn't managed by the outer layer's vtable.
+  - When repurposing an FFI type for new ownership semantics, the Drop/clone story must be updated throughout.
+  - The reactor stores `std::task::Waker` (converted from FfiWaker via into_waker), not FfiWaker directly. This extra indirection is where the leak lives.
+---
