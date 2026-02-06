@@ -168,3 +168,73 @@ cargo test --workspace && cargo xtask dist && ./dist/run.sh --plugin plugins/exa
 # Full: two-plugin isolation
 ./dist/run.sh --plugin plugins/example-plugin --plugin plugins/second-plugin
 ```
+
+## Design Guidelines
+
+### Same-compiler ABI invariant
+
+All plugins are compiled by the same rustc, same target, same panic strategy, and same patched crate sources. This guarantees:
+
+- **Identical memory layout** for all concrete Rust types (`String`, `Vec<T>`, structs, enums) across all plugins and the host.
+- **Shared global allocator** — memory allocated in one plugin can be freed in another.
+- **Monomorphized drop glue** — each plugin has its own copy of `Drop` impls for every type it uses. When plugin B drops a `String` that was created by plugin A, B's own `drop` glue runs. This is safe because the layout is identical.
+
+This invariant is **load-bearing** for the entire plugin system. It means concrete data types can cross plugin boundaries freely — no serialization, no FFI wrappers, just Rust moves.
+
+### No custom FFI primitives for things Rust already provides
+
+**Do NOT build custom FFI infrastructure when standard Rust types work.**
+
+Standard Rust synchronization and data types (`Arc`, `Mutex`, `VecDeque`, channels, etc.) work across plugin boundaries because of the same-compiler ABI invariant. There is no need to route data through host-side registries with opaque handles, function pointer callbacks, and manual cleanup.
+
+**Bad — custom FFI channel:**
+```
+Host stores VecDeque<*mut ()> + drop_in_place_fn in a global HashMap
+tau_stream_create() / tau_stream_push() / tau_stream_poll_next() FFI calls
+Requires plugin_id tracking, drop_plugin_streams(), unload safety investigation
+```
+
+**Good — standard Rust types:**
+```
+Arc<Mutex<VecDeque<T>>> or async-channel or tokio::sync::mpsc
+No FFI. No host-side state. No function pointers. No unload concerns.
+Plugin A creates channel, Plugin B gets receiver via resource. Both use their
+own monomorphized drop glue. Arc handles lifetime. Done.
+```
+
+The rule: if the data is a concrete Rust type (no trait objects, no fn pointers), it can cross plugin boundaries as-is. Only use FFI primitives for things that genuinely need host-side coordination (task scheduling, IO reactor, timer wheel).
+
+### When FFI IS needed
+
+FFI primitives (`#[no_mangle] pub extern "C"`) are needed when:
+
+- **One shared instance is required** — the executor, reactor, and timer wheel must be singletons. Multiple copies would break scheduling. These live in `tau-rt` (dylib) or `tau-host`.
+- **The host must be involved** — task spawning, IO registration, and plugin lifecycle need host-side state that persists across plugin loads/unloads.
+- **Dynamic types cross boundaries** — trait objects (`dyn Stream`, `dyn Fn`) contain vtable pointers into a specific plugin's `.text` section. These must be wrapped in `PluginBox`/`PluginArc`/`PluginFn` to prevent use-after-unload.
+
+### Plugin unload safety
+
+On plugin unload, `AsyncPlugin::drop` runs this sequence **before** `dlclose`:
+
+1. `plugin_destroy()` — plugin's voluntary cleanup
+2. `drop_plugin_tasks(plugin_id)` — drops all task futures (runs destructors)
+3. `drop_plugin_events(plugin_id)` — drops event subscription callbacks
+4. `drop_plugin_resources(plugin_id)` — drops resources via stored `drop_fn`
+5. `dlclose()` — unmaps the plugin binary
+
+**Concrete data** (`String`, `Vec`, `Arc<Mutex<...>>`) that has been moved to another plugin or the host survives unload safely — the surviving holder's own drop glue handles cleanup.
+
+**Dynamic types** (trait objects, closures, fn pointers) that point into the unloaded plugin's `.text` are UB after `dlclose`. Always wrap these in `PluginBox`/`PluginArc`/`PluginFn` so the `PluginGuard` keeps the binary alive.
+
+**Function pointers stored in host-side registries** (e.g., `drop_fn` in resources, event callbacks) are cleaned up by the `drop_plugin_*` functions before `dlclose`. Any new host-side registry that stores function pointers MUST have a corresponding `drop_plugin_*` cleanup function and be added to the unload sequence.
+
+### Prefer ecosystem crates over custom implementations
+
+When a well-maintained ecosystem crate solves the problem, use it instead of writing a custom implementation. Examples:
+
+- **Channels**: `async-channel`, `tokio::sync::mpsc` (via tau-tokio shim), `flume` — not custom FFI channels
+- **Stream trait**: `futures-core::Stream` re-export — not a custom trait
+- **Stream combinators**: evaluate `tokio-stream`, `futures-util` — only write custom combinators if the ecosystem crate can't compile against the tau shim
+- **Synchronization**: `std::sync`, `parking_lot` — not custom FFI mutexes
+
+These crates compile into each plugin as rlibs. The same-compiler invariant means their internal data structures have identical layout across plugins. No special handling needed.

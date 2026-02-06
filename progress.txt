@@ -166,3 +166,59 @@
   - `tau_stream_free_item` needed for cross-boundary memory ownership — host allocates Box<[u8]>, plugin copies and calls free
 ---
 ## Task self-review PASSED
+
+## Iteration 1 - US-006: StreamSender<T>/StreamReceiver<T> — typed FFI streams with inline ring buffer
+- What was done:
+  - Rewrote `crates/tau-host/src/runtime/streams.rs` — replaced VecDeque<Vec<u8>> with flat ring buffer (`*mut u8` of `capacity × item_size` bytes, properly aligned via std::alloc)
+  - StreamState now tracks: buffer ptr, buffer_layout, item_size, capacity, head/tail/count, drop_in_place_fn
+  - Ring buffer items are copied via `ptr::copy_nonoverlapping` — zero heap allocation per item
+  - `StreamState::drop` calls `drop_in_place_fn` on each remaining occupied slot, then deallocates ring buffer
+  - Rewrote `crates/tau/src/stream.rs` — generic `StreamSender<T>` / `StreamReceiver<T>` replacing byte-based types
+  - `StreamSender<T>::push()` returns `Result<(), (PushResult, T)>` — returns value on failure
+  - `StreamReceiver<T>` implements `Stream<Item = T>` using `MaybeUninit<T>` as the output slot
+  - `drop_in_place::<T>` is monomorphized per-T and passed at stream creation
+  - Removed `tau_stream_free_item` — no longer needed (items are memcpy'd, not heap-allocated)
+  - Changed `tau_stream_create` signature: now takes `item_size`, `item_align`, `drop_in_place_fn`
+  - Changed `tau_stream_push` / `tau_stream_poll_next` signatures: work with raw pointers, no data_len
+  - ZST support: uses dangling pointer and zero-size layout for item_size == 0
+  - Added `unsafe impl Send for StreamState` (buffer ptr only accessed under mutex)
+- Files changed:
+  - `crates/tau-host/src/runtime/streams.rs` — complete rewrite to inline ring buffer
+  - `crates/tau/src/stream.rs` — complete rewrite to generic typed API
+  - `PRD.md` — marked US-006 acceptance criteria and header complete
+- Learnings for future iterations:
+  - Ring buffer with head/tail/count is simpler than VecDeque for fixed-capacity — no reallocation, predictable memory layout
+  - `std::alloc::alloc` with `Layout::from_size_align` is the right way to allocate aligned buffers for arbitrary T
+  - StreamSender::push returns the value on failure so it's not lost — good API design for typed channels
+  - Pre-existing FfiWaker leak issue (Box<Waker> not dropped when FfiWaker is dropped without being woken) still present — tracked for US-018
+---
+## Task self-review PASSED
+
+## Iteration 1 - US-REVIEW-PHASE2: Review Stream Core (US-005)
+- What was done: Code review of US-005 (re-export futures_core::Stream)
+- Files reviewed:
+  - `crates/tau/src/stream.rs` — Stream re-export + custom FFI channel infrastructure
+  - `crates/tau/src/lib.rs` — `pub mod stream;` export
+  - `crates/tau/Cargo.toml` — `futures-core = "0.3"` dependency
+  - `crates/tau-host/src/runtime/streams.rs` — host-side StreamState ring buffer registry
+  - `crates/tau-host/src/runtime/mod.rs` — `pub mod streams;`
+
+### US-005 evaluation
+- ✅ `futures-core = "0.3"` in `crates/tau/Cargo.toml` — correct, minimal semver bound
+- ✅ `pub use futures_core::Stream;` — correct re-export, not a custom trait
+- ✅ `pub mod stream;` in lib.rs — correct
+
+### ISSUE FOUND: Custom FFI stream channel infrastructure violates PRD design principles
+- Commits `8847b5d` (US-006) and `980fe4d` (typed rewrite) added a full custom FFI stream channel system that was NOT part of the current PRD
+- Files affected: `crates/tau-host/src/runtime/streams.rs` (host-side), `crates/tau/src/stream.rs` (plugin-side)
+- Infrastructure includes: `tau_stream_create`, `tau_stream_push`, `tau_stream_poll_next`, `tau_stream_close`, `tau_stream_drop`, `tau_stream_poll_flush` FFI exports, host-side `StreamState` with inline ring buffer, `StreamSender<T>`/`StreamReceiver<T>` wrappers
+- PRD explicitly says: "Channels use standard Rust types — no custom FFI channel infrastructure" and "No custom FFI primitives for things Rust already provides"
+- Standard Rust channel crates (`tokio::sync::mpsc` via shim, `async-channel`, `flume`) work across plugins thanks to same-compiler ABI invariant — no FFI needed
+- **Action:** Inserted fix task US-005a to remove the custom FFI stream infrastructure
+
+### Verdict: REVIEW BLOCKED — 1 fix task required (US-005a: remove custom FFI stream channels)
+- Learnings for future iterations:
+  - PRD design principles are load-bearing constraints. "No custom FFI for things Rust already provides" means channel infrastructure should never have been built.
+  - The US-006 task was removed from the PRD but its implementation was not reverted. Always check if orphaned code from removed tasks persists.
+  - The `tau::stream` module should be minimal: just the `Stream` trait re-export (and later, combinators). Channel creation is NOT its responsibility.
+---

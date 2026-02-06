@@ -8,7 +8,7 @@ Several foundational primitives are missing from the runtime:
 
 1. **Task abort** — `JoinHandle::abort()` is currently a no-op. Dropping or aborting a task should actually cancel it: drop the future, clean up timers, and notify waiters. This is how Rust async cancellation works — by dropping futures.
 
-2. **Async streams** — there is no `Stream` trait or stream primitive. The runtime supports `Future` (poll once → result) but not `Stream` (poll repeatedly → sequence of items). Streams are the building block for LLM token streaming, event pipelines, transform chains, and reactive data flow.
+2. **Async streams** — there is no `Stream` trait or stream combinators. The runtime supports `Future` (poll once → result) but not `Stream` (poll repeatedly → sequence of items). Streams are the building block for LLM token streaming, event pipelines, transform chains, and reactive data flow. No custom FFI channel is needed — standard Rust channel crates (the tokio mpsc shim, `async-channel`, etc.) work across plugins because all plugins share the same compiler ABI and global allocator.
 
 3. **AsyncFd** — tau-rt has raw IO reactor FFI (`tau_io_register`, `tau_io_poll_ready`, `tau_io_deregister`) but no safe `AsyncFd` wrapper. Plugins and vendored crates (crossterm) need a safe, `std::task::Context`-based async fd type.
 
@@ -21,10 +21,10 @@ All primitives must integrate with the existing tokio shim so that crates like `
 - Make `JoinHandle::abort()` actually cancel the associated task (drop future, wake waiters with `JoinError`)
 - Make `AbortHandle::abort()` work the same way (decoupled from JoinHandle lifetime)
 - Ensure cancelled tasks' futures are dropped during the same drive cycle (not deferred)
-- Implement a `Stream` trait in the `tau` crate compatible with `futures_core::Stream`
-- Implement FFI-safe stream handles so plugins can create, push to, and consume streams across the plugin boundary
+- Re-export `futures_core::Stream` in the `tau` crate — the standard async iterator trait, compatible with the entire ecosystem
 - Implement core stream combinators: `map`, `filter`, `filter_map`, `take_while`, `merge`, and async `then`/`async_map`
 - Provide a `tokio-stream`-compatible shim (same Cargo `[patch]` mechanism as the tokio shim) so crates depending on `tokio-stream` compile against our implementation
+- Channels use standard Rust types (`Arc<Mutex<VecDeque<T>>>`) — no custom FFI channel infrastructure. The existing `tokio::sync::mpsc` shim and ecosystem crates like `async-channel` already work across plugins thanks to the same-compiler ABI invariant.
 - Add `AsyncFd` to `tau-rt` as the safe wrapper for the IO reactor
 - Vendor crossterm with mio replaced by tau's reactor primitives, patched into plugins via `patches.list`
 - Support both sync (`crossterm::event::poll`/`read`) and async (`EventStream`) event APIs
@@ -194,7 +194,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### Phase 2: Stream Trait & Core Types
+### Phase 2: Stream Trait
 
 > **Reference: futures-core Stream trait**
 >
@@ -211,6 +211,10 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - `tokio-stream` re-exports `futures_core::Stream` and provides `StreamExt` (combinators + adapters).
 > - `futures` re-exports `futures_core::Stream` and provides its own `StreamExt` (slightly different set of combinators).
 > - Key decision: we re-export the SAME trait from `futures-core`, so there's zero impedance mismatch with the ecosystem. We do NOT define our own Stream trait.
+>
+> **Why no custom FFI channel:**
+>
+> The existing `tokio::sync::mpsc` shim (`Arc<Mutex<VecDeque<T>>>`) and ecosystem crates like `async-channel` already work across plugins. Thanks to the same-compiler ABI invariant, `Arc`, `Mutex`, `VecDeque`, and any concrete `T` have identical layout in all plugins. They share the global allocator. When one plugin drops the last `Arc` reference, its own monomorphized drop glue runs — no function pointers stored in host memory, no `plugin_id` tracking, no cleanup on unload. Channels are just Rust types. The `Stream` trait is just the interface receivers implement.
 
 ---
 
@@ -228,134 +232,32 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-006: `StreamSender<T>` / `StreamReceiver<T>` — typed FFI streams with inline ring buffer [x]
+### US-005a: Remove custom FFI stream channel infrastructure [x]
 
-**Description:** As a plugin developer, I want typed stream channels so I can produce and consume `Stream<Item = T>` across the FFI boundary without serialization or per-item heap allocation.
-
-> **🔍 Research before implementing:**
-> - Read `crates/tau-host/src/runtime/executor.rs` lines 15-29 — the same-compiler invariant: "Concrete data (structs, String, Vec, etc.) CAN safely cross between plugins because the same-compiler invariant guarantees identical layout, and all plugins share the same global allocator." This means a Rust move (`ptr::copy_nonoverlapping` of `size_of::<T>()` bytes) is safe across the FFI boundary.
-> - Read `crates/tau-host/src/runtime/events.rs` — OnceLock + Mutex + HashMap + u64 handles pattern. Streams follow the same pattern.
-> - Read tokio `mpsc` channel: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html — the bounded sender/receiver split. Our `StreamSender<T>`/`StreamReceiver<T>` is conceptually the same but the buffer lives host-side behind opaque handles.
-> - Key insight: a Rust move IS a memcpy of `size_of::<T>()` bytes. The host manages a flat ring buffer of `capacity × item_size` bytes. Push copies bytes in (`ptr::copy_nonoverlapping` from the sender's stack), poll copies bytes out (into the receiver's stack). Zero heap allocation per item. The host never interprets the bytes — just manages slots.
-> - Key: `drop_in_place_fn` (provided at stream creation) is called on each remaining slot when the stream is destroyed. It calls `ptr::drop_in_place::<T>()` — runs `T`'s destructor without freeing memory (the ring buffer owns the storage).
-> - Key: no serialization needed. `T: Send + 'static` is sufficient. The same-compiler guarantee means layout is identical across all plugins.
+**Description:** Commits `8847b5d` and `980fe4d` added a custom FFI stream channel system (`tau_stream_*` exports, host-side `StreamState` ring buffer registry, `StreamSender<T>`/`StreamReceiver<T>` wrappers) based on an old US-006 task that was removed from the PRD. This directly violates the PRD's design principle: "No custom FFI primitives for things Rust already provides." Standard Rust channel crates (`tokio::sync::mpsc` via the shim, `async-channel`, `flume`) already work across plugins thanks to the same-compiler ABI invariant. The custom FFI infrastructure must be removed.
 
 **Acceptance Criteria:**
-- [x] Change FFI declarations in `crates/tau/src/stream.rs`:
-  - `tau_stream_create(capacity: u32, item_size: usize, item_align: usize, drop_in_place_fn: unsafe extern "C" fn(*mut ())) -> u64` — creates a bounded stream with a ring buffer of `capacity × item_size` bytes (properly aligned), returns handle
-  - `tau_stream_push(handle: u64, item_ptr: *const u8) -> u8` — copies `item_size` bytes from `item_ptr` into the next ring buffer slot (returns 0=ok, 1=full, 2=closed). Caller must `mem::forget` the original value after a successful push (ownership transferred).
-  - `tau_stream_poll_next(handle: u64, waker: FfiWaker, out_ptr: *mut u8) -> u8` — copies `item_size` bytes from the next ring buffer slot into `out_ptr` (returns 0=pending, 1=ready, 2=done). Caller owns the bytes at `out_ptr` after a successful poll.
-  - `tau_stream_close(handle: u64)` — signal no more items (sender side)
-  - `tau_stream_drop(handle: u64)` — release handle (receiver side, cancels the stream)
-  - `tau_stream_poll_flush(handle: u64, waker: FfiWaker) -> u8` — backpressure for sender
-- [x] Remove `tau_stream_free_item` — no longer needed
-- [x] Change host-side `crates/tau-host/src/runtime/streams.rs`:
-  - `StreamState` stores a flat `Vec<u8>` ring buffer (allocated as `capacity × item_size` with correct alignment), `item_size`, `head`/`tail` indices, `count`, and a `drop_in_place_fn: unsafe extern "C" fn(*mut ())`
-  - `tau_stream_push` does `ptr::copy_nonoverlapping(item_ptr, &mut buffer[tail * item_size], item_size)` — no heap allocation, just a memcpy into the slot
-  - `tau_stream_poll_next` does `ptr::copy_nonoverlapping(&buffer[head * item_size], out_ptr, item_size)` — memcpy out of the slot
-  - On stream cleanup (both sides gone, or plugin unload), remaining buffered items are destroyed by calling `drop_in_place_fn` on each occupied slot's pointer, then the ring buffer is freed
-- [x] Plugin-side generic wrappers in `crates/tau/src/stream.rs`:
-  - `StreamSender<T: Send + 'static>` — wraps handle, `push(&self, value: T) -> PushResult` passes `&value as *const T as *const u8` to FFI then `mem::forget(value)`, `async send(&self, value: T) -> bool` waits if full, `close(self)` signals done
-  - `StreamReceiver<T: Send + 'static>` — wraps handle, implements `Stream<Item = T>` using `MaybeUninit<T>` as the output slot, `Drop` calls `tau_stream_drop`
-  - The `drop_in_place_fn` is monomorphized per-T: `unsafe extern "C" fn drop_in_place<T>(ptr: *mut ()) { ptr::drop_in_place(ptr as *mut T); }` — runs destructor without freeing (the ring buffer owns the memory)
-- [x] `pub fn channel<T: Send + 'static>(capacity: u32) -> (StreamSender<T>, StreamReceiver<T>)` constructor
+- [x] Remove `crates/tau-host/src/runtime/streams.rs` entirely (host-side `StreamState`, ring buffer, all `tau_stream_*` FFI exports)
+- [x] Remove `pub mod streams;` from `crates/tau-host/src/runtime/mod.rs`
+- [x] Revert `crates/tau/src/stream.rs` to ONLY the `futures_core::Stream` re-export (remove all FFI declarations, `StreamSender<T>`, `StreamReceiver<T>`, `channel()`, `PushResult`, `SendFuture`, `make_ffi_waker`)
+- [x] Verify no other files reference `tau_stream_*` or `StreamSender`/`StreamReceiver`
 - [x] `cargo build` succeeds for the workspace
 - [x] Existing tests still pass
 
 ---
 
-### US-008: Stream integration test — typed push/poll across FFI [ ]
+### US-REVIEW-PHASE2: Review Stream Core (US-005) [ ]
 
-**Description:** As a developer, I want a test proving typed streams work end-to-end across the plugin boundary.
-
-> **🔍 Research before implementing:**
-> - Read existing test plugins `plugins/example-plugin/`, `plugins/second-plugin/` for the pattern
-> - Read `crates/tau-host/src/main.rs` — how plugin requests work, how to trigger from the host
-> - Key edge cases to test: (1) push to closed stream, (2) poll after sender dropped (should get remaining items then None), (3) drop receiver while sender still has items (sender push should return `closed`), (4) zero-capacity stream (rendezvous — push blocks until poll)
-> - Key: test with concrete Rust types (String, structs, Vec) — NOT serialized bytes. The same-compiler invariant guarantees layout compatibility.
+**Description:** Review US-005 as a cohesive system.
 
 **Acceptance Criteria:**
-- [ ] Create `plugins/stream-test-plugin/` that:
-  - On "produce N": creates a `channel::<String>(8)`, pushes N string items, closes it, stores the receiver in a resource
-  - On "consume": polls the stored `StreamReceiver<String>`, collects all items, prints them
-  - On "async-produce": spawns a task that pushes items with `sleep` between each, stores receiver
-  - On "struct-stream": creates a `channel::<MyStruct>(4)` with a custom struct, pushes/consumes — proves arbitrary concrete types work
-- [ ] Add a test in `tests/` that loads the plugin and exercises produce→consume and async-produce→consume
-- [ ] Verify all items are received in order with correct types (no serialization artifacts)
-- [ ] Verify the stream signals completion (poll returns `None` after close)
-- [ ] Verify dropping the receiver doesn't crash even if sender still exists
-- [ ] Verify items are properly dropped (no leaks) when stream is destroyed with items still buffered
-- [ ] `cargo build` succeeds for the workspace
-
----
-
-### US-008a: Investigate stream safety under dynamic plugin unload [ ]
-
-**Description:** The typed stream design (US-006) stores a `drop_in_place_fn: unsafe extern "C" fn(*mut ())` in the host-side `StreamState`. This function pointer is monomorphized in the *creating* plugin's `.text` section. If that plugin is unloaded (`dlclose`'d) while the stream still has buffered items in the ring buffer, calling `drop_in_place_fn` on those slots is UB — the code it points to no longer exists.
-
-This is the same class of problem that `PluginGuard` / `PluginBox` / `PluginArc` / `PluginFn` solve for trait objects and closures. The investigation must determine the right approach for streams and produce concrete design recommendations that US-006 implements.
-
-> **🔍 Research before implementing:**
-> - Read `crates/tau/src/guard.rs` — the `PluginGuard` / `PluginBinary` ref-counting system. `PluginBox<T>` keeps a plugin's binary alive by holding an `Arc<PluginBinary>`. The `drop_fn` in `PluginBinary` calls `dlclose` only when the last `Arc` clone drops.
-> - Read `crates/tau-host/src/main.rs` `AsyncPlugin::drop` (line ~117) — the unload sequence: `plugin_destroy()` → `drop_plugin_tasks()` → `drop_plugin_events()` → `drop_plugin_resources()` → `dlclose()`. Each cleanup function runs the plugin's monomorphized drop glue *while the plugin is still loaded*.
-> - Read `crates/tau-host/src/runtime/resources.rs` `drop_plugin_resources()` — how resources handle this: each `ResourceEntry` stores `plugin_id` + `drop_fn`. On unload, all resources belonging to that `plugin_id` are dropped in-order, calling `drop_fn` before `dlclose`.
-> - Read `crates/tau-host/src/runtime/executor.rs` lines 15-34 — the same-compiler invariant documentation. Key: "Concrete data can safely cross between plugins because the same-compiler invariant guarantees identical layout." BUT: "Dynamic types (trait objects, closures, function pointers) CANNOT cross plugin boundaries because they contain pointers into a specific plugin's `.text` section." The `drop_in_place_fn` is exactly such a function pointer.
-> - Read `crates/tau-host/src/runtime/plugin_guard.rs` — how the host creates `PluginGuard` from the dlopen handle.
-
-**Scenarios to analyze:**
-
-1. **Same-plugin stream (common case):** Plugin A creates both sender and receiver. Plugin A is unloaded. The current `drop_plugin_*` sequence should drop the stream (and its buffered items via `drop_in_place_fn`) before `dlclose`. Straightforward — same pattern as resources.
-
-2. **Cross-plugin stream:** Plugin A creates a `channel::<String>(8)` and stores the `StreamReceiver<String>` in a resource. Plugin B retrieves the receiver and consumes it. Plugin A is unloaded while items are still buffered in the ring buffer.
-   - The `drop_in_place_fn` in `StreamState` points into A's code — calling it after A's `dlclose` is UB.
-   - BUT: for concrete types like `String`, Plugin B has its own monomorphized drop glue. If B pops the item via `poll_next`, the item is memcpy'd into B's `MaybeUninit<T>` and dropped using B's own `Drop` impl — which is safe.
-   - The danger is only for *remaining buffered items that nobody pops* — those are destroyed by the host using `drop_in_place_fn` on each ring buffer slot.
-
-3. **Stream with trait objects:** A `channel::<PluginBox<dyn MyTrait>>(4)` — the items themselves contain code pointers. Even if the receiver pops them, dropping the `PluginBox` calls into the creating plugin's code. The `PluginGuard` inside each `PluginBox` item handles this (keeps the plugin alive). But the stream's own `drop_in_place_fn` is a separate concern.
-
-4. **Stream outlives creating plugin (no consumer):** Plugin A creates a stream, pushes items, then crashes or is force-unloaded. Nobody holds the receiver. The host must clean up the ring buffer and its items using `drop_in_place_fn` — but A is gone.
-
-**Questions to answer:**
-
-- Should `StreamState` store a `PluginGuard` (like `PluginBox` does) to prevent `dlclose` while the stream exists? This would keep A's binary alive until the stream is fully drained and destroyed — safe but delays unload.
-- Or should `drop_plugin_streams(plugin_id)` be added to the unload sequence (like resources), force-destroying all streams created by that plugin before `dlclose`? This is simpler but may surprise a receiver in another plugin.
-- Or should the host track `plugin_id` on the stream and, on unload, replace `drop_in_place_fn` with a no-op (leak the items) or with a generic `dealloc` (free the ring buffer without running destructors)? This avoids UB but leaks or skips destructors.
-- For concrete `T: Send + 'static` types (no vtables, no fn pointers), is the `drop_in_place_fn` actually interchangeable between plugins? Since all plugins compile the same `drop_in_place::<String>`, the function pointer from any plugin would work. Can the host substitute the receiver plugin's `drop_in_place_fn` when the creator plugin is unloaded?
-- What's the interaction with `PluginGuard`-wrapped stream items? If `T = PluginBox<dyn Foo>`, the `PluginGuard` inside each item already keeps the relevant binary alive. Does this compose correctly with whatever stream cleanup strategy we pick?
-
-**Acceptance Criteria:**
-- [ ] Document which scenarios are safe, which are UB, and which are merely surprising
-- [ ] Recommend ONE approach for US-006 to implement (with rationale for why the alternatives were rejected)
-- [ ] If the recommendation involves `PluginGuard` on streams: specify exactly which FFI calls need to change (e.g., `tau_stream_create` takes an additional guard handle, or the host stores a guard alongside the ring buffer)
-- [ ] If the recommendation involves `drop_plugin_streams`: specify where it goes in the unload sequence and what happens to the other plugin's receiver
-- [ ] Add the chosen approach's implementation details to US-006's acceptance criteria
-- [ ] Consider whether the same issue affects the event bus (`tau_event_emit` passes `(*const u8, usize)` — the callback fn pointers are already tracked by `plugin_id` and cleaned up on unload, so events may already be safe)
-- [ ] Write findings as a section in `progress.txt` or a dedicated `docs/stream-unload-safety.md`
-
----
-
-### US-REVIEW-PHASE2: Review Stream Core (US-005 through US-008a) [ ]
-
-**Description:** Review US-005 through US-008a as a cohesive system.
-
-**Acceptance Criteria:**
-- [ ] Identify phase scope: US-005 to US-008a
-- [ ] Run: `git log --oneline --all | grep -E "US-00[5-8]"`
+- [ ] Identify phase scope: US-005
 - [ ] Review all phase code files together
 - [ ] Evaluate quality:
-  - Good taste: Simple and elegant across all tasks?
-  - No special cases: Edge cases handled through design?
-  - Data structures: Consistent and appropriate?
-  - Complexity: Can anything be simplified?
-  - Duplication: Any repeated logic BETWEEN tasks?
-  - Integration: Do components work together cleanly?
-- [ ] Cross-task analysis:
-  - Verify `StreamState` hot path doesn't do unnecessary allocations
-  - Verify waker handling: push wakes receiver, poll stores waker correctly
-  - Verify backpressure: bounded stream with full buffer returns `Full` from push, sender can async-wait
+  - Good taste: Simple and elegant?
   - Confirm `tau::stream::Stream` is a re-export of `futures_core::Stream` (not a separate trait)
-  - Verify US-008a findings are implemented: `drop_in_place_fn` safety under plugin unload, `plugin_id` tracking, cleanup sequence
-  - Verify cross-plugin stream scenario doesn't have dangling `drop_in_place_fn` pointers after unload
+  - Confirm no custom FFI channel infrastructure remains (no `tau_stream_*` FFI, no host-side `StreamState`)
+  - Verify `futures-core` resolves to one version across tau + plugin deps
 - [ ] If issues found:
   - Insert fix tasks after the failing task (US-008a, US-008b, etc.)
   - Append review findings to progress.txt
@@ -841,22 +743,18 @@ This is the same class of problem that `PluginGuard` / `PluginBox` / `PluginArc`
 
 ### Existing Architecture Constraints
 
-- **RefCell borrow discipline:** The executor uses `thread_local! { RefCell<Runtime> }`. Any new host-side state (stream storage) must follow the same rule: never hold the borrow while calling plugin code. Stream state should use its own `OnceLock<Mutex<...>>` like events and resources do, or be integrated into the `Runtime` struct with the same snapshot-then-poll pattern.
-
-- **Plugin ownership tracking:** Streams must be tagged with `plugin_id` (like tasks, events, and resources). On plugin unload, all streams owned by that plugin must be dropped before `dlclose()`. Add cleanup to the existing `AsyncPlugin::drop()` sequence.
-
-- **FFI waker pattern:** Stream polling uses the same `FfiWaker` mechanism as task polling. The host provides a waker that pushes the task to the wake queue; the plugin calls `poll_next` with this waker.
+- **RefCell borrow discipline:** The executor uses `thread_local! { RefCell<Runtime> }`. Any new host-side state must follow the same rule: never hold the borrow while calling plugin code.
 
 - **Tokio shim patching mechanism:** New shim crates (`tokio-stream`, optionally `futures-core`) use the same `--config 'patch.crates-io.<name>.path=...'` injection in `compiler.rs`. The dist layout needs matching `dist/src/<name>/` directories.
 
 - **Symbol hash matching:** New shim crates must participate in the same symbol hash matching scheme. In dev mode, they're workspace members with `path` dependencies. In dist mode, they use `--extern tau=...` to match the prebuilt `libtau.dylib`.
 
+- **No custom FFI for channels:** Channels (`tokio::sync::mpsc`, `async-channel`, etc.) are standard Rust types compiled into each plugin. They use `Arc<Mutex<VecDeque<T>>>` or similar — no host-side state, no FFI, no `plugin_id` tracking. The same-compiler ABI invariant guarantees they work across plugin boundaries for concrete types. See `AGENTS.md` "Design Guidelines" for the full rationale.
+
 ### Performance Considerations
 
-- The `Stream` trait and combinators live in the `tau` crate (plugin side) — they're monomorphized per-plugin with zero FFI overhead for pure in-plugin streams.
-- The FFI stream mechanism is for cross-boundary streams only. In-plugin streams (e.g., `iter.map(...).filter(...)`) never touch FFI.
-- FFI streams use an inline ring buffer — zero serialization, zero per-item heap allocation. The host allocates `capacity × item_size` bytes at stream creation and manages head/tail indices. Push and poll are each a single `memcpy` of `size_of::<T>()` bytes (the same cost as a Rust move). The host never interprets the bytes.
-- The host-side `StreamState` storage uses `Mutex` because `spawn_blocking` threads may push items. For the common single-threaded case, the mutex is uncontended.
+- The `Stream` trait and combinators live in the `tau` crate (plugin side) — they're monomorphized per-plugin with zero FFI overhead.
+- Channels are standard Rust types (e.g., `Arc<Mutex<VecDeque<T>>>`) — no FFI overhead, no serialization. Items are moved (memcpy of `size_of::<T>()` bytes), same as any Rust value transfer.
 - Combinator structs should be `#[repr(transparent)]` or minimal-size where possible to avoid bloating future state.
 
 ### AsyncFd & Crossterm Architecture

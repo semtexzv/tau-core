@@ -8,7 +8,6 @@ pub mod executor;
 pub mod reactor;
 pub mod resources;
 pub mod events;
-pub mod streams;
 pub mod plugin_guard;
 
 use executor::{poll_snapshot, RUNTIME};
