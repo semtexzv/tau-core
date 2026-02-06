@@ -9,7 +9,6 @@ use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tau::io as tio;
-use tau::types::FfiWaker;
 
 fn debug() -> bool {
     crate::debug_enabled()
@@ -113,24 +112,6 @@ impl TcpStream {
         )
     }
     
-    /// Convert context waker to FfiWaker for reactor
-    fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker {
-        // We need to convert std::task::Waker to FfiWaker
-        // The waker's wake function will be called by the reactor
-        let waker = cx.waker().clone();
-        let boxed = Box::new(waker);
-        let data = Box::into_raw(boxed) as *mut ();
-        
-        extern "C" fn wake_fn(data: *mut ()) {
-            let waker = unsafe { Box::from_raw(data as *mut std::task::Waker) };
-            waker.wake();
-        }
-        
-        FfiWaker {
-            data,
-            wake_fn: Some(wake_fn),
-        }
-    }
 }
 
 impl Drop for TcpStream {
@@ -152,7 +133,7 @@ impl AsyncRead for TcpStream {
         let this = unsafe { self.get_unchecked_mut() };
         
         // Check reactor readiness first
-        let ffi_waker = Self::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(this.reactor_handle, tio::DIR_READ, ffi_waker) {
             // Not ready, waker stored in reactor
             return Poll::Pending;
@@ -175,7 +156,7 @@ impl AsyncRead for TcpStream {
                     eprintln!("[tcp] poll_read → WouldBlock, cleared readiness");
                 }
                 // Re-register waker
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_READ, ffi_waker);
                 Poll::Pending
             }
@@ -199,7 +180,7 @@ impl AsyncWrite for TcpStream {
         let this = unsafe { self.get_unchecked_mut() };
         
         // Check reactor readiness first
-        let ffi_waker = Self::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker) {
             return Poll::Pending;
         }
@@ -216,7 +197,7 @@ impl AsyncWrite for TcpStream {
                 if debug() {
                     eprintln!("[tcp] poll_write → WouldBlock, cleared readiness");
                 }
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -235,7 +216,7 @@ impl AsyncWrite for TcpStream {
         match (&this.inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -271,24 +252,6 @@ impl Drop for OwnedReadHalf {
     }
 }
 
-impl OwnedReadHalf {
-    fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker {
-        let waker = cx.waker().clone();
-        let boxed = Box::new(waker);
-        let data = Box::into_raw(boxed) as *mut ();
-        
-        extern "C" fn wake_fn(data: *mut ()) {
-            let waker = unsafe { Box::from_raw(data as *mut std::task::Waker) };
-            waker.wake();
-        }
-        
-        FfiWaker {
-            data,
-            wake_fn: Some(wake_fn),
-        }
-    }
-}
-
 impl AsyncRead for OwnedReadHalf {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -298,7 +261,7 @@ impl AsyncRead for OwnedReadHalf {
         use std::io::Read;
         let this = self.get_mut();
         
-        let ffi_waker = Self::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(this.reactor_handle, tio::DIR_READ, ffi_waker) {
             return Poll::Pending;
         }
@@ -311,7 +274,7 @@ impl AsyncRead for OwnedReadHalf {
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(this.reactor_handle, tio::DIR_READ);
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_READ, ffi_waker);
                 Poll::Pending
             }
@@ -337,24 +300,6 @@ impl Drop for OwnedWriteHalf {
     }
 }
 
-impl OwnedWriteHalf {
-    fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker {
-        let waker = cx.waker().clone();
-        let boxed = Box::new(waker);
-        let data = Box::into_raw(boxed) as *mut ();
-        
-        extern "C" fn wake_fn(data: *mut ()) {
-            let waker = unsafe { Box::from_raw(data as *mut std::task::Waker) };
-            waker.wake();
-        }
-        
-        FfiWaker {
-            data,
-            wake_fn: Some(wake_fn),
-        }
-    }
-}
-
 impl AsyncWrite for OwnedWriteHalf {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -364,7 +309,7 @@ impl AsyncWrite for OwnedWriteHalf {
         use std::io::Write;
         let this = self.get_mut();
         
-        let ffi_waker = Self::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker) {
             return Poll::Pending;
         }
@@ -373,7 +318,7 @@ impl AsyncWrite for OwnedWriteHalf {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(this.reactor_handle, tio::DIR_WRITE);
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -387,7 +332,7 @@ impl AsyncWrite for OwnedWriteHalf {
         match (&*this.inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -530,21 +475,6 @@ impl<'a> ConnectFuture<'a> {
         Self { socket, reactor_handle: handle }
     }
     
-    fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker {
-        let waker = cx.waker().clone();
-        let boxed = Box::new(waker);
-        let data = Box::into_raw(boxed) as *mut ();
-        
-        extern "C" fn wake_fn(data: *mut ()) {
-            let waker = unsafe { Box::from_raw(data as *mut std::task::Waker) };
-            waker.wake();
-        }
-        
-        FfiWaker {
-            data,
-            wake_fn: Some(wake_fn),
-        }
-    }
 }
 
 impl<'a> Drop for ConnectFuture<'a> {
@@ -564,7 +494,7 @@ impl<'a> std::future::Future for ConnectFuture<'a> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Check reactor for writability (connect completion)
         if let Some(handle) = self.reactor_handle {
-            let ffi_waker = Self::make_ffi_waker(cx);
+            let ffi_waker = tio::make_ffi_waker(cx);
             if !tio::poll_ready(handle, tio::DIR_WRITE, ffi_waker) {
                 // Not ready yet, waker registered with reactor
                 return Poll::Pending;
@@ -671,21 +601,6 @@ impl UnixStream {
         Ok(Self { inner: stream, reactor_handle: handle })
     }
     
-    fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker {
-        let waker = cx.waker().clone();
-        let boxed = Box::new(waker);
-        let data = Box::into_raw(boxed) as *mut ();
-        
-        extern "C" fn wake_fn(data: *mut ()) {
-            let waker = unsafe { Box::from_raw(data as *mut std::task::Waker) };
-            waker.wake();
-        }
-        
-        FfiWaker {
-            data,
-            wake_fn: Some(wake_fn),
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -705,7 +620,7 @@ impl AsyncRead for UnixStream {
         use std::io::Read;
         let this = unsafe { self.get_unchecked_mut() };
         
-        let ffi_waker = Self::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(this.reactor_handle, tio::DIR_READ, ffi_waker) {
             return Poll::Pending;
         }
@@ -718,7 +633,7 @@ impl AsyncRead for UnixStream {
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(this.reactor_handle, tio::DIR_READ);
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_READ, ffi_waker);
                 Poll::Pending
             }
@@ -737,7 +652,7 @@ impl AsyncWrite for UnixStream {
         use std::io::Write;
         let this = unsafe { self.get_unchecked_mut() };
         
-        let ffi_waker = Self::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker) {
             return Poll::Pending;
         }
@@ -746,7 +661,7 @@ impl AsyncWrite for UnixStream {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(this.reactor_handle, tio::DIR_WRITE);
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -760,7 +675,7 @@ impl AsyncWrite for UnixStream {
         match (&this.inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                let ffi_waker = Self::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(this.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -900,20 +815,6 @@ impl UdpSocket {
         self.inner.leave_multicast_v6(multiaddr, interface)
     }
 
-    fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker {
-        let waker = cx.waker().clone();
-        let data = Box::into_raw(Box::new(waker)) as *mut ();
-        
-        extern "C" fn wake_fn(data: *mut ()) {
-            let waker = unsafe { Box::from_raw(data as *mut std::task::Waker) };
-            waker.wake();
-        }
-        
-        FfiWaker {
-            data,
-            wake_fn: Some(wake_fn),
-        }
-    }
 }
 
 impl Drop for UdpSocket {
@@ -946,7 +847,7 @@ struct SendFut<'a> {
 impl std::future::Future for SendFut<'_> {
     type Output = io::Result<usize>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let ffi_waker = UdpSocket::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(self.socket.reactor_handle, tio::DIR_WRITE, ffi_waker) {
             return Poll::Pending;
         }
@@ -954,7 +855,7 @@ impl std::future::Future for SendFut<'_> {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(self.socket.reactor_handle, tio::DIR_WRITE);
-                let ffi_waker = UdpSocket::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(self.socket.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -971,7 +872,7 @@ struct RecvFut<'a> {
 impl std::future::Future for RecvFut<'_> {
     type Output = io::Result<usize>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let ffi_waker = UdpSocket::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(self.socket.reactor_handle, tio::DIR_READ, ffi_waker) {
             return Poll::Pending;
         }
@@ -979,7 +880,7 @@ impl std::future::Future for RecvFut<'_> {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(self.socket.reactor_handle, tio::DIR_READ);
-                let ffi_waker = UdpSocket::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(self.socket.reactor_handle, tio::DIR_READ, ffi_waker);
                 Poll::Pending
             }
@@ -997,7 +898,7 @@ struct SendToFut<'a> {
 impl std::future::Future for SendToFut<'_> {
     type Output = io::Result<usize>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let ffi_waker = UdpSocket::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(self.socket.reactor_handle, tio::DIR_WRITE, ffi_waker) {
             return Poll::Pending;
         }
@@ -1005,7 +906,7 @@ impl std::future::Future for SendToFut<'_> {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(self.socket.reactor_handle, tio::DIR_WRITE);
-                let ffi_waker = UdpSocket::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(self.socket.reactor_handle, tio::DIR_WRITE, ffi_waker);
                 Poll::Pending
             }
@@ -1022,7 +923,7 @@ struct RecvFromFut<'a> {
 impl std::future::Future for RecvFromFut<'_> {
     type Output = io::Result<(usize, SocketAddr)>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let ffi_waker = UdpSocket::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(self.socket.reactor_handle, tio::DIR_READ, ffi_waker) {
             return Poll::Pending;
         }
@@ -1030,7 +931,7 @@ impl std::future::Future for RecvFromFut<'_> {
             Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(self.socket.reactor_handle, tio::DIR_READ);
-                let ffi_waker = UdpSocket::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(self.socket.reactor_handle, tio::DIR_READ, ffi_waker);
                 Poll::Pending
             }
@@ -1047,7 +948,7 @@ struct PeekFromFut<'a> {
 impl std::future::Future for PeekFromFut<'_> {
     type Output = io::Result<(usize, SocketAddr)>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let ffi_waker = UdpSocket::make_ffi_waker(cx);
+        let ffi_waker = tio::make_ffi_waker(cx);
         if !tio::poll_ready(self.socket.reactor_handle, tio::DIR_READ, ffi_waker) {
             return Poll::Pending;
         }
@@ -1055,7 +956,7 @@ impl std::future::Future for PeekFromFut<'_> {
             Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 tio::clear_ready(self.socket.reactor_handle, tio::DIR_READ);
-                let ffi_waker = UdpSocket::make_ffi_waker(cx);
+                let ffi_waker = tio::make_ffi_waker(cx);
                 tio::poll_ready(self.socket.reactor_handle, tio::DIR_READ, ffi_waker);
                 Poll::Pending
             }

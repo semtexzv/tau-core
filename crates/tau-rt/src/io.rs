@@ -59,14 +59,15 @@ pub fn deregister(handle: u64) {
 }
 
 // =============================================================================
-// ffi_waker_from_cx — convert std Context waker to FfiWaker
+// make_ffi_waker — convert std Context waker to FfiWaker
 // =============================================================================
 
 /// Convert a `Context`'s waker into an `FfiWaker` suitable for the reactor.
 ///
-/// Clones the waker, boxes it, and returns an `FfiWaker` whose `wake_fn`
-/// unboxes and calls `waker.wake()`.
-pub fn ffi_waker_from_cx(cx: &std::task::Context<'_>) -> FfiWaker {
+/// Clones the waker from `cx`, boxes it, and returns an `FfiWaker` whose
+/// `wake_fn` unboxes and calls `waker.wake()`. This is the canonical utility —
+/// use it instead of duplicating the clone-box-wake pattern.
+pub fn make_ffi_waker(cx: &std::task::Context<'_>) -> FfiWaker {
     let waker = cx.waker().clone();
     let data = Box::into_raw(Box::new(waker)) as *mut ();
 
@@ -118,7 +119,7 @@ impl AsyncFd {
     /// Returns `Poll::Ready(Ok(()))` if the fd is readable, or `Poll::Pending`
     /// if not (the waker is stored by the reactor).
     pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let waker = ffi_waker_from_cx(cx);
+        let waker = make_ffi_waker(cx);
         if poll_ready(self.handle, DIR_READ, waker) {
             Poll::Ready(Ok(()))
         } else {
@@ -128,7 +129,7 @@ impl AsyncFd {
 
     /// Poll for write readiness.
     pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let waker = ffi_waker_from_cx(cx);
+        let waker = make_ffi_waker(cx);
         if poll_ready(self.handle, DIR_WRITE, waker) {
             Poll::Ready(Ok(()))
         } else {

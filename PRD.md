@@ -647,7 +647,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-018: Add `make_ffi_waker` utility and refactor tau-tokio to use it [ ]
+### US-018: Add `make_ffi_waker` utility and refactor tau-tokio to use it [x]
 
 **Description:** As a developer, I want a single `make_ffi_waker(cx)` utility so the duplicated waker-boxing pattern in tau-tokio/net is eliminated. This utility lives in `tau-rt` and is used by `AsyncFd`, the tokio shim, and the crossterm vendor.
 
@@ -658,13 +658,13 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Key: the `wake_fn` must call `Box::from_raw` to reclaim the `Waker`, then call `waker.wake()`. This frees the box. If the reactor replaces a stored `FfiWaker` with a new one (on re-poll), the old waker's box leaks unless the reactor explicitly drops it. Check `crates/tau-host/src/runtime/reactor.rs` to see if it drops replaced wakers.
 
 **Acceptance Criteria:**
-- [ ] Add `pub fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker` to `crates/tau-rt/src/io.rs`
+- [x] Add `pub fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker` to `crates/tau-rt/src/io.rs`
   - Clones the waker from `cx`, boxes it, returns `FfiWaker { data, wake_fn }`
   - The `wake_fn` unboxes and calls `waker.wake()`
-- [ ] Refactor all `make_ffi_waker` implementations in `crates/tau-tokio/src/net/mod.rs` (TcpStream, OwnedReadHalf, OwnedWriteHalf, UdpSocket, ConnectFuture — currently 5 identical copies) to use `tau::io::make_ffi_waker(cx)` instead
-- [ ] `AsyncFd::poll_read_ready` and `poll_write_ready` use this utility internally
-- [ ] `cargo build` succeeds for the workspace (zero warnings from removed duplicates)
-- [ ] Existing tests still pass
+- [x] Refactor all `make_ffi_waker` implementations in `crates/tau-tokio/src/net/mod.rs` (TcpStream, OwnedReadHalf, OwnedWriteHalf, UdpSocket, ConnectFuture — currently 5 identical copies) to use `tau::io::make_ffi_waker(cx)` instead
+- [x] `AsyncFd::poll_read_ready` and `poll_write_ready` use this utility internally
+- [x] `cargo build` succeeds for the workspace (zero warnings from removed duplicates)
+- [x] Existing tests still pass
 
 ---
 

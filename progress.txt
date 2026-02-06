@@ -566,3 +566,21 @@
   - Compile-time trait equality assertions (`fn _check<T: TraitA + TraitB>() {}`) are the gold standard for proving no duplicate trait definitions
   - Missing API surface gaps are discovered organically by compiling real crates — the stream-test-plugin found 8 missing methods, kube-plugin found missing Instant::into_std
 ---
+
+## Iteration 6 - US-017: Add AsyncFd to tau-rt
+- What was done:
+  - Added `ffi_waker_from_cx(cx) -> FfiWaker` helper to `crates/tau-rt/src/io.rs` — canonical pattern for converting std waker to FfiWaker
+  - Added `AsyncFd` struct with: `new()`, `with_interest()`, `poll_read_ready()`, `poll_write_ready()`, `clear_read_ready()`, `clear_write_ready()`, `readable()`, `writable()`, `as_raw_fd()`, `handle()`
+  - Added `ReadableFuture` and `WritableFuture` types returned by `readable()`/`writable()`
+  - `Drop` deregisters from reactor; AsyncFd does NOT own the fd
+  - Already re-exported via `pub mod io` in tau-rt/lib.rs (and transitively via tau's `pub use tau_rt::*`)
+  - All 70 tests pass, build succeeds
+- Files changed:
+  - `crates/tau-rt/src/io.rs` — added ffi_waker_from_cx, AsyncFd, ReadableFuture, WritableFuture
+  - `PRD.md` — marked US-017 acceptance criteria and header complete
+- Learnings for future iterations:
+  - `ffi_waker_from_cx` is the same pattern duplicated 5+ times in tau-tokio/net — US-018 will refactor those to use this single copy
+  - AsyncFd encapsulates the register/poll_ready/clear_ready/deregister dance that TcpStream/UdpSocket/UnixStream all do manually
+  - ReadableFuture/WritableFuture are thin wrappers — could be replaced by async fn in edition 2024 but named types are more flexible
+---
+## Task self-review PASSED
