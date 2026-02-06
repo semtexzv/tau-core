@@ -144,13 +144,18 @@ pub extern "C" fn tau_block_on(task_id: u64) {
 // Task abort export
 // =============================================================================
 
-/// Abort a task by ID. Returns 1 if the task was found and aborted, 0 otherwise.
-/// Safe to call from within a task's poll (the future drop is deferred).
+/// Abort a task by ID. Returns 1 (accepted).
+///
+/// The abort is queued and processed on the main thread during the next drive cycle.
+/// This makes it safe to call from any thread (e.g., `spawn_blocking` background threads)
+/// where the thread-local RUNTIME is not available.
+///
+/// Always returns 1 ("accepted"). Use `tau_task_is_finished` to check if the task
+/// was actually aborted.
 #[no_mangle]
 pub extern "C" fn tau_task_abort(task_id: u64) -> u8 {
-    RUNTIME.with(|rt| {
-        if rt.borrow_mut().abort_task(task_id) { 1 } else { 0 }
-    })
+    executor::queue_abort(task_id);
+    1
 }
 
 /// Check if a task is finished (completed, aborted, or removed).

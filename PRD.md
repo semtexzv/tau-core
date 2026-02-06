@@ -143,6 +143,25 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
+### US-004a: Make `tau_task_abort` work from background threads (cross-thread abort) [x]
+
+**Description:** `AbortHandle::abort()` silently fails when called from a `spawn_blocking` thread because `tau_task_abort` accesses the thread-local `RUNTIME`, which is empty on background threads. Since `AbortHandle` is `Clone + Send + Sync` (it only holds a `u64`), users reasonably expect it to work from any thread — matching tokio's `AbortHandle` semantics.
+
+**Root cause:** `tau_task_abort` in `crates/tau-host/src/runtime/mod.rs` calls `RUNTIME.with(|rt| rt.borrow_mut().abort_task(task_id))`, which accesses a thread-local `RefCell<Runtime>`. Background threads get an empty default `Runtime`.
+
+**Fix:** Follow the existing `WAKE_QUEUE` pattern — add a global `ABORT_QUEUE: OnceLock<Mutex<VecDeque<u64>>>`. `tau_task_abort` pushes to this queue and calls `try_notify_reactor()`. `prepare_drive()` drains the queue and calls `abort_task()` for each entry. This is the same pattern the wake system uses and keeps the actual abort logic on the main thread.
+
+**Acceptance Criteria:**
+- [x] Add `static ABORT_QUEUE: OnceLock<Mutex<VecDeque<u64>>>` in `executor.rs` (same pattern as `WAKE_QUEUE`)
+- [x] `tau_task_abort` pushes `task_id` to `ABORT_QUEUE` and calls `try_notify_reactor()` (instead of accessing thread-local RUNTIME directly)
+- [x] `prepare_drive()` drains `ABORT_QUEUE` and calls `self.abort_task(id)` for each entry
+- [x] `tau_task_abort` return value: since the abort is now async (queued), always return 1 ("accepted"). Callers should not rely on the return value to know if the task existed — use `tau_task_is_finished` instead.
+- [x] Add a test case in `abort-test-plugin`: spawn a task, pass its `task_id` to `spawn_blocking`, abort from the background thread, verify the task is cancelled
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
+
+---
+
 ### US-REVIEW-PHASE1: Review Task Abort (US-001 through US-004) [ ]
 
 **Description:** Review US-001 through US-004 as a cohesive system.

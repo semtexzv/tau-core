@@ -6,6 +6,7 @@
 //!   "check"  — print whether the task is finished and whether Drop ran
 //!   "spawn-and-complete" — spawn a task that completes immediately
 //!   "abort-completed" — abort the already-completed task (should be no-op)
+//!   "cross-thread-abort" — spawn a task, abort it from a background thread, verify cancelled
 
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -115,6 +116,39 @@ tau::define_plugin! {
                 } else {
                     println!("[abort-test] No task to abort");
                 }
+                0
+            }
+
+            "cross-thread-spawn" => {
+                // Spawn a long-running task (same as "spawn" but for cross-thread test)
+                DROP_RAN.store(false, Ordering::SeqCst);
+                let handle = tau::spawn(async {
+                    let _detector = DropDetector;
+                    println!("[abort-test] Cross-thread target task started, sleeping...");
+                    tau::sleep(std::time::Duration::from_secs(60)).await;
+                    println!("[abort-test] Cross-thread target completed (should NOT see this)");
+                });
+                let tid = handle.task_id();
+                TASK_ID.store(tid, Ordering::SeqCst);
+                println!("[abort-test] Spawned cross-thread target task_id={}", tid);
+                0
+            }
+
+            "cross-thread-abort" => {
+                // Abort from a background thread using the stored task_id
+                let tid = TASK_ID.load(Ordering::SeqCst);
+                if tid == 0 {
+                    println!("[abort-test] No task to cross-thread abort");
+                    return 0;
+                }
+                std::thread::spawn(move || {
+                    println!("[abort-test] Background thread calling tau_task_abort({})", tid);
+                    let result = unsafe { tau_task_abort(tid) };
+                    println!("[abort-test] Background thread abort result={}", result);
+                });
+
+                // Give the background thread a moment to queue the abort
+                std::thread::sleep(std::time::Duration::from_millis(50));
                 0
             }
 

@@ -106,6 +106,38 @@ else
     fi
 fi
 
+# --- Test 3: Cross-thread abort ---
+echo
+echo "Checking cross-thread abort..."
+
+# Background thread should have called abort
+if echo "$OUTPUT" | grep -q "\[abort-test\] Background thread calling tau_task_abort"; then
+    pass "Background thread called tau_task_abort"
+else
+    fail "Background thread should have called tau_task_abort"
+fi
+
+# Abort from background thread should return 1 (accepted/queued)
+if echo "$OUTPUT" | grep -q "\[abort-test\] Background thread abort result=1"; then
+    pass "Background thread abort returned 1 (accepted)"
+else
+    fail "Background thread abort should return 1"
+fi
+
+# After drive, the cross-thread target should be finished with drop
+if echo "$OUTPUT" | grep -q "is_finished=1.*drop_ran=true"; then
+    pass "Cross-thread aborted task reports finished with drop confirmed"
+else
+    fail "Cross-thread aborted task should be finished with drop_ran=true"
+fi
+
+# Should NOT see the cross-thread target completion
+if echo "$OUTPUT" | grep -q "Cross-thread target completed"; then
+    fail "Cross-thread aborted task should NOT complete"
+else
+    pass "Cross-thread aborted task did not complete (as expected)"
+fi
+
 echo
 echo "=========================================="
 echo " Summary"

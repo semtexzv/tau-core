@@ -95,6 +95,24 @@ fn wake_queue() -> &'static Mutex<VecDeque<u64>> {
     WAKE_QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+// =============================================================================
+// Global abort queue — allows tau_task_abort from any thread (e.g. spawn_blocking)
+// =============================================================================
+
+static ABORT_QUEUE: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
+
+fn abort_queue() -> &'static Mutex<VecDeque<u64>> {
+    ABORT_QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Queue a task abort from any thread. The abort is processed on the main thread
+/// during the next `prepare_drive()` cycle.
+pub fn queue_abort(task_id: u64) {
+    rt_debug!("queue_abort task_id={}", task_id);
+    abort_queue().lock().unwrap().push_back(task_id);
+    crate::runtime::reactor::try_notify_reactor();
+}
+
 /// C-ABI wake function: pushes task_id to the global wake queue.
 /// Also notifies the reactor to wake from any blocking poll.
 extern "C" fn wake_task_fn(data: *mut ()) {
@@ -399,6 +417,14 @@ impl Runtime {
             while let Some(task_id) = wq.pop_front() {
                 self.ready_queue.push_back(task_id);
                 woken += 1;
+            }
+        }
+
+        // 1b. Drain global abort queue
+        {
+            let mut aq = abort_queue().lock().unwrap();
+            while let Some(task_id) = aq.pop_front() {
+                self.abort_task(task_id);
             }
         }
 

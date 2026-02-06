@@ -32,5 +32,25 @@ send abort spawn-and-complete
 # Abort should be a no-op (task already completed and removed)
 send abort abort-completed
 
+# =====================================================
+# Test: Cross-thread abort (from background thread)
+# =====================================================
+print Test: Cross-thread abort — abort from background thread works
+
+# Spawn the task
+send abort cross-thread-spawn
+
+# Drive so the task starts running (creates DropDetector, starts sleeping)
+drive 5
+
+# Now abort from a background thread (queues to ABORT_QUEUE)
+send abort cross-thread-abort
+
+# Drive to process the queued abort
+drive 10
+
+# Check that the task is finished and Drop ran
+send abort check
+
 # Cleanup
 unload abort
