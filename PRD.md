@@ -1,16 +1,20 @@
-# PRD: Core Infrastructure Primitives — Task Abort & Async Streams
+# PRD: Core Infrastructure Primitives
 
 ## Introduction
 
 Tau-core is a shared async runtime with dynamic plugin infrastructure. Plugins are separately-compiled `.cdylib` crates that share a single-threaded async executor with the host via dynamic linking, with a tokio compatibility shim that redirects standard `tokio::*` APIs to the tau runtime.
 
-Two foundational primitives are missing from the runtime:
+Several foundational primitives are missing from the runtime:
 
 1. **Task abort** — `JoinHandle::abort()` is currently a no-op. Dropping or aborting a task should actually cancel it: drop the future, clean up timers, and notify waiters. This is how Rust async cancellation works — by dropping futures.
 
-2. **Async streams** — there is no `Stream` trait or stream primitive. The runtime supports `Future` (poll once → result) but not `Stream` (poll repeatedly → sequence of items). Streams are the building block for LLM token streaming, event pipelines, transform chains, and reactive data flow. They need to be fast (no unnecessary allocations on the hot path), work across the FFI boundary, and compose (map, filter, async transforms).
+2. **Async streams** — there is no `Stream` trait or stream primitive. The runtime supports `Future` (poll once → result) but not `Stream` (poll repeatedly → sequence of items). Streams are the building block for LLM token streaming, event pipelines, transform chains, and reactive data flow.
 
-Both primitives must integrate with the existing tokio shim so that crates like `reqwest`, `kube`, `tokio-stream`, and `futures` work transparently when compiled against the shim.
+3. **AsyncFd** — tau-rt has raw IO reactor FFI (`tau_io_register`, `tau_io_poll_ready`, `tau_io_deregister`) but no safe `AsyncFd` wrapper. Plugins and vendored crates (crossterm) need a safe, `std::task::Context`-based async fd type.
+
+4. **Crossterm without mio** — The `crossterm` crate depends on `mio` + `signal-hook-mio` for event polling. Since tau-core already has a reactor (backed by `polling` crate), we vendor crossterm and replace its mio-based event source with one using tau's IO primitives. This removes the mio dependency and unifies all IO through the tau reactor.
+
+All primitives must integrate with the existing tokio shim so that crates like `reqwest`, `kube`, `tokio-stream`, and `futures` work transparently when compiled against the shim.
 
 ## Goals
 
@@ -21,6 +25,9 @@ Both primitives must integrate with the existing tokio shim so that crates like 
 - Implement FFI-safe stream handles so plugins can create, push to, and consume streams across the plugin boundary
 - Implement core stream combinators: `map`, `filter`, `filter_map`, `take_while`, `merge`, and async `then`/`async_map`
 - Provide a `tokio-stream`-compatible shim (same Cargo `[patch]` mechanism as the tokio shim) so crates depending on `tokio-stream` compile against our implementation
+- Add `AsyncFd` to `tau-rt` as the safe wrapper for the IO reactor
+- Vendor crossterm with mio replaced by tau's reactor primitives, patched into plugins via `patches.list`
+- Support both sync (`crossterm::event::poll`/`read`) and async (`EventStream`) event APIs
 - Maintain all existing tokio shim compatibility — `reqwest`, `kube`, `tokio-util` must continue to compile and work
 - All changes pass `cargo build` for the workspace and `cargo xtask test`
 
@@ -431,8 +438,165 @@ Both primitives must integrate with the existing tokio shim so that crates like 
 
 ---
 
+### Phase 5: AsyncFd & Crossterm Vendor
+
+---
+
+### US-017: Add `AsyncFd` to `tau-rt` [ ]
+
+**Description:** As a plugin developer, I want a safe `AsyncFd` type that wraps a raw file descriptor and provides async readability/writability polling through the tau reactor, so I don't have to manually juggle `FfiWaker` and raw FFI calls.
+
+**Acceptance Criteria:**
+- [ ] Create `AsyncFd` struct in `crates/tau-rt/src/io.rs` (extend existing file):
+  - `AsyncFd::new(fd: RawFd) -> io::Result<Self>` — registers fd for READABLE|WRITABLE with the reactor
+  - `AsyncFd::with_interest(fd: RawFd, interest: u8) -> io::Result<Self>` — registers with specific interest flags
+  - `AsyncFd::poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>` — polls for readability using `tau_io_poll_ready` with a waker extracted from `cx`
+  - `AsyncFd::poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>` — polls for writability
+  - `AsyncFd::clear_read_ready(&self)` — calls `tau_io_clear_ready` for the read direction
+  - `AsyncFd::clear_write_ready(&self)` — calls `tau_io_clear_ready` for the write direction
+  - `AsyncFd::readable(&self) -> impl Future` — async wrapper around `poll_read_ready`
+  - `AsyncFd::writable(&self) -> impl Future` — async wrapper around `poll_write_ready`
+  - `Drop` calls `tau_io_deregister`
+  - `AsyncFd::as_raw_fd(&self) -> RawFd`
+  - `AsyncFd::handle(&self) -> u64` — returns the reactor handle
+- [ ] `AsyncFd` does NOT own the fd (caller manages fd lifetime)
+- [ ] Helper: `fn ffi_waker_from_cx(cx: &mut Context<'_>) -> FfiWaker` — converts a std Waker to FfiWaker (clone waker, box it, set wake_fn)
+- [ ] Re-export `AsyncFd` from `crates/tau-rt/src/lib.rs`
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-018: Add `make_ffi_waker` utility and refactor tau-tokio to use it [ ]
+
+**Description:** As a developer, I want a single `make_ffi_waker(cx)` utility so the duplicated waker-boxing pattern in tau-tokio/net is eliminated. This utility lives in `tau-rt` and is used by `AsyncFd`, the tokio shim, and the crossterm vendor.
+
+**Acceptance Criteria:**
+- [ ] Add `pub fn make_ffi_waker(cx: &Context<'_>) -> FfiWaker` to `crates/tau-rt/src/io.rs`
+  - Clones the waker from `cx`, boxes it, returns `FfiWaker { data, wake_fn }`
+  - The `wake_fn` unboxes and calls `waker.wake()`
+- [ ] Refactor all `make_ffi_waker` implementations in `crates/tau-tokio/src/net/mod.rs` (TcpStream, OwnedReadHalf, OwnedWriteHalf, UdpSocket, ConnectFuture — currently 5 identical copies) to use `tau::io::make_ffi_waker(cx)` instead
+- [ ] `AsyncFd::poll_read_ready` and `poll_write_ready` use this utility internally
+- [ ] `cargo build` succeeds for the workspace (zero warnings from removed duplicates)
+- [ ] Existing tests still pass
+
+---
+
+### US-019: Vendor crossterm — initial fork with features trimmed [ ]
+
+**Description:** As a developer, I want a vendored copy of crossterm 0.28 in the workspace with mio-related features removed, so we can replace the event system with tau's reactor.
+
+**Acceptance Criteria:**
+- [ ] Copy crossterm 0.28 source to `vendor/crossterm/` (from crates.io or the old tau fork at `~/tau/vendor/crossterm/`)
+- [ ] Edit `vendor/crossterm/Cargo.toml`:
+  - Remove `mio`, `signal-hook`, `signal-hook-mio` from `[dependencies]`
+  - Remove the `events` feature (which pulls in mio)
+  - Change `default` feature to `["bracketed-paste"]` (no `events`, no `windows`)
+  - Add `tau = { version = "0.1" }` dependency
+  - Add `futures-core = { version = "0.3", optional = true }` dependency
+  - Change `event-stream` feature to `["dep:futures-core"]`
+  - Keep `use-dev-tty` and `bracketed-paste` features as-is
+- [ ] Add `crossterm = vendor/crossterm` to `patches.list`
+- [ ] The crate compiles with `default-features = false, features = ["bracketed-paste"]` (no event system yet — that comes in the next story)
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-020: Replace mio event source with tau reactor (sync poll/read) [ ]
+
+**Description:** As a crossterm user, I want `crossterm::event::poll()` and `crossterm::event::read()` to work using tau's reactor instead of mio, so sync terminal event reading works without mio.
+
+**Acceptance Criteria:**
+- [ ] Create `vendor/crossterm/src/event/source/unix/tau.rs` replacing `mio.rs`:
+  - `UnixInternalEventSource` struct holds: reactor handle for tty fd, reactor handle for SIGWINCH self-pipe read end, Parser, tty FileDesc, read buffer
+  - Constructor: opens tty, sets non-blocking, registers with reactor via `tau::io::register()`. Creates SIGWINCH self-pipe, registers read end with reactor. Installs signal handler.
+  - `try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>>`: uses `polling::Poller` (or `tau::block_on` / `tau::drive` with timeout) to wait for readiness on tty or sigwinch pipe, then reads and parses
+- [ ] Update `vendor/crossterm/src/event/source/unix.rs` to use `tau` module instead of `mio` module (the `cfg` dispatch)
+- [ ] Replace mio-based `Waker` in `vendor/crossterm/src/event/sys/unix/waker/` with a tau reactor notify-based implementation (calls `tau_reactor_notify`)
+- [ ] `crossterm::event::poll(Duration)` works — blocks up to timeout, returns `Ok(true)` if event available
+- [ ] `crossterm::event::read()` works — blocks until an event is available, returns it
+- [ ] SIGWINCH produces `Event::Resize` events
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-021: Implement async `EventStream` using `AsyncFd` [ ]
+
+**Description:** As a plugin developer, I want `crossterm::event::EventStream` to implement `futures_core::Stream` using `AsyncFd` for tty and SIGWINCH polling, so I can await terminal events in async code.
+
+**Acceptance Criteria:**
+- [ ] Create `vendor/crossterm/src/event/stream.rs` (replaces the old mio/tokio-based stream):
+  - `EventStream` struct holds: `AsyncFd` for tty, `AsyncFd` for SIGWINCH pipe read end, Parser, tty FileDesc, read buffer, raw SIGWINCH pipe fd
+  - Constructor: same setup as sync source (tty, self-pipe, signal handler) but using `tau::io::AsyncFd`
+  - `EventStream::new() -> Self`
+  - `EventStream::next(&mut self) -> Option<io::Result<Event>>` — convenience async method
+- [ ] Implement `Stream for EventStream`:
+  - `poll_next`: check parser buffer → poll SIGWINCH `AsyncFd` for read → poll tty `AsyncFd` for read → parse bytes → return event or `Pending`
+  - Wakers registered via `AsyncFd::poll_read_ready(cx)` — standard `Context`, no `async-ffi` / `FfiContext` needed
+- [ ] `Drop` cleans up: close self-pipe, restore SIGWINCH to SIG_DFL, AsyncFd deregisters from reactor
+- [ ] Gated behind `#[cfg(feature = "event-stream")]`
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-022: Crossterm integration test — sync and async events [ ]
+
+**Description:** As a developer, I want a test plugin that proves crossterm's sync and async event APIs work through the tau reactor.
+
+**Acceptance Criteria:**
+- [ ] Create `plugins/crossterm-test-plugin/` that depends on `crossterm = { version = "0.28", features = ["event-stream"] }`
+- [ ] Plugin init: enables raw mode, hides cursor
+- [ ] Plugin destroy: disables raw mode, shows cursor
+- [ ] On request "poll <ms>": calls `crossterm::event::poll(Duration::from_millis(ms))`, reports result
+- [ ] On request "read": calls `crossterm::event::read()`, prints the event
+- [ ] On request "stream": spawns a task that creates an `EventStream`, reads 5 events via `.next().await`, prints them
+- [ ] On request "size": calls `crossterm::terminal::size()`, prints result
+- [ ] Plugin compiles via `./dist/run.sh --plugin plugins/crossterm-test-plugin`
+- [ ] Basic smoke test: load plugin, send "size", verify response
+- [ ] `cargo build` succeeds for the workspace
+- [ ] Existing tests still pass
+
+---
+
+### US-REVIEW-PHASE5: Review AsyncFd & Crossterm (US-017 through US-022) [ ]
+
+**Description:** Review US-017 through US-022 as a cohesive system.
+
+**Acceptance Criteria:**
+- [ ] Identify phase scope: US-017 to US-022
+- [ ] Run: `git log --oneline --all | grep -E "US-0(1[7-9]|2[0-2])"`
+- [ ] Review all phase code files together
+- [ ] Evaluate quality:
+  - Good taste: Simple and elegant across all tasks?
+  - No special cases: Edge cases handled through design?
+  - Data structures: Consistent and appropriate?
+  - Complexity: Can anything be simplified?
+  - Duplication: Any repeated logic BETWEEN tasks?
+  - Integration: Do components work together cleanly?
+- [ ] Cross-task analysis:
+  - Verify `AsyncFd` waker lifecycle: waker boxed once per poll, freed on wake or on next poll. No leaks.
+  - Verify crossterm's `EventStream` correctly registers wakers for BOTH tty and SIGWINCH fds — a key event shouldn't be missed because only one fd's waker fires
+  - Verify SIGWINCH self-pipe doesn't leak fds on drop
+  - Verify sync `poll()`/`read()` works when called from within `tau::block_on` (no reactor deadlock — the sync source should use `polling` directly or tau's drive loop)
+  - Verify the vendored crossterm patches cleanly into plugin builds (patches.list entry works, no version conflicts)
+  - Verify `make_ffi_waker` doesn't double-free: if the reactor calls `wake_fn` AND the next poll creates a new waker, the old one must be properly freed
+- [ ] If issues found:
+  - Insert fix tasks after the failing task (US-022a, US-022b, etc.)
+  - Append review findings to progress.txt
+  - Do NOT mark this review task [x]
+- [ ] If no issues:
+  - Append "## Phase 5 review PASSED" to progress.txt
+  - Mark this review task [x]
+  - Commit: "docs: phase 5 review complete"
+
+---
+
 ## Non-Goals
 
+- **TUI framework** — tau-tui component system, layout engine, differential rendering are a separate PRD built on top of the crossterm shim
 - **Conversation tree / session model** — out of scope, will be a separate `tau-agent` / `taugent` crate later
 - **Agent loop orchestration** — out of scope, built on top of these primitives later
 - **Tool schema registry** — out of scope, depends on a redesigned plugin interface
@@ -441,6 +605,8 @@ Both primitives must integrate with the existing tokio shim so that crates like 
 - **Multi-threaded runtime** — the runtime remains single-threaded; `spawn_blocking` uses OS threads
 - **Hot reload** — plugin unload/reload is not addressed
 - **Backpressure across FFI for existing event bus** — `tau::event` remains as-is (fire-and-forget pub/sub)
+- **Windows support for crossterm vendor** — macOS and Linux only; crossterm's Windows code is untouched but untested
+- **Mouse/paste events in crossterm** — bracketed paste is kept; mouse support depends on escape sequence parsing which is inherited unchanged from upstream
 
 ## Technical Considerations
 
@@ -462,6 +628,20 @@ Both primitives must integrate with the existing tokio shim so that crates like 
 - The `StreamHandle` FFI mechanism is for cross-boundary streams only. In-plugin streams (e.g., `iter.map(...).filter(...)`) never touch FFI.
 - The host-side `StreamState` storage uses `Mutex` because `spawn_blocking` threads may push items. For the common single-threaded case, the mutex is uncontended.
 - Combinator structs should be `#[repr(transparent)]` or minimal-size where possible to avoid bloating future state.
+
+### AsyncFd & Crossterm Architecture
+
+- **`AsyncFd` lives in `tau-rt` (dylib)** — it wraps the existing FFI calls (`tau_io_register`, `tau_io_poll_ready`, etc.) in a safe struct. Since it's in the dylib, there's ONE implementation shared by all plugins. It takes `&mut Context<'_>` (standard Rust async), NOT a custom FFI context type. The conversion to `FfiWaker` happens inside `AsyncFd`.
+
+- **`make_ffi_waker` utility** — converts `&Context<'_>` → `FfiWaker` by cloning the waker, boxing it, and providing a `wake_fn` that unboxes and calls `Waker::wake()`. This eliminates the 5 identical copies currently in `tau-tokio/src/net/mod.rs`. The reactor's `tau_io_poll_ready` stores the `FfiWaker` and calls `wake_fn` when the fd becomes ready — this frees the box. If the task is re-polled before the reactor fires, a new waker replaces the old one (the old one is leaked — acceptable because the reactor also drops stored wakers on deregister).
+
+- **Crossterm vendor strategy** — full fork of crossterm 0.28 in `vendor/crossterm/`. The fork removes the `mio`, `signal-hook`, `signal-hook-mio` deps and replaces the event source with a tau reactor-based implementation. The rest of crossterm (escape sequences, terminal control, cursor, style) is unchanged. Patched into plugin builds via `patches.list` entry `crossterm = vendor/crossterm`.
+
+- **Sync event polling** — crossterm's `poll(timeout)` and `read()` need to block. In the tau runtime, this is done by calling `tau::drive()` in a loop with the reactor's `polling::Poller::wait(timeout)`. Since we're single-threaded, this is the same pattern as `tau_block_on`. The sync source can use `polling::Poller` directly (the host's reactor is accessible) or use a simpler approach: register with reactor, then spin `tau::drive()` until ready or timeout.
+
+- **Async EventStream** — implements `futures_core::Stream<Item = io::Result<Event>>` using two `AsyncFd`s (tty + SIGWINCH self-pipe). `poll_next` checks both fds via `AsyncFd::poll_read_ready(cx)`, reads bytes, parses events. No `async-ffi` / `FfiContext` needed — `AsyncFd` converts the standard `Context` internally.
+
+- **SIGWINCH handling** — same self-pipe trick as the old tau fork: `pipe()` → signal handler writes to write-end → read-end is registered with reactor → `EventStream` drains it and emits `Event::Resize`.
 
 ### Compatibility Notes
 
