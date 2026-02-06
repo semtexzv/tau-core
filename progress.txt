@@ -431,3 +431,22 @@
   - Plugin spawned tasks may not run to completion if the host shuts down immediately — this is expected behavior
 ## Task self-review PASSED
 ---
+
+## Iteration 11 - US-COMP-001: Restructure build cache with environment hash
+- What was done:
+  - Verified existing implementation of two-level build cache in compiler.rs
+  - Added `env_hash: OnceCell<String>` field to `Compiler` struct
+  - Added `get_or_compute_env_hash()` method that hashes: HOST_VERSION, HOST_RUSTFLAGS, HOST_PANIC, HOST_TARGET_FEATURES, tau-rt dylib content, PATCHES_LIST
+  - Added `parse_crate_name()` to extract package name from plugin Cargo.toml
+  - Restructured `get_build_cache_dir()` to return `~/.tau/buildcache/<env_hash>/<crate_name>.<src_hash>/`
+  - Verified with dist build: cache dir is `afff4643e5ad47f/example-plugin.43ac1298/`
+  - All 65 tests pass, dist build and plugin run work correctly
+- Files changed:
+  - `crates/tau-host/src/compiler.rs` — env_hash field, get_or_compute_env_hash(), parse_crate_name(), restructured get_build_cache_dir()
+  - `PRD.md` — marked US-COMP-001 acceptance criteria and header complete
+- Learnings for future iterations:
+  - OnceCell is the right pattern for lazy-computed cached values on non-Send structs
+  - DefaultHasher (SipHash) is adequate for cache keys — not cryptographic but collision-resistant enough
+  - parse_crate_name is a simple line-by-line search — works for all current plugins but wouldn't handle exotic Cargo.toml layouts
+---
+## Task self-review PASSED

@@ -141,6 +141,13 @@ impl Compiler {
         }
 
         let cache_dir = self.get_build_cache_dir(&source_dir, dist_lib_path)?;
+
+        // Fast path: skip cargo if all sources are unchanged
+        if let Some(artifact) = self.check_up_to_date(&cache_dir, &source_dir) {
+            println!("[Compiler] Plugin up-to-date (skipped): {:?}", artifact);
+            return Ok(artifact);
+        }
+
         let target_dir = cache_dir.join("target");
         let is_release = !cfg!(debug_assertions);
         let profile = if is_release { "release" } else { "debug" };
@@ -194,6 +201,111 @@ impl Compiler {
             &target_dir.join(profile),
             &cache_dir.join("plugins"),
         )
+    }
+
+    /// Check if a previously-built plugin is still up-to-date by parsing the
+    /// cargo dep file and checking mtimes. Returns `Some(artifact_path)` if
+    /// all source deps are older than the artifact; `None` if a rebuild is needed.
+    fn check_up_to_date(
+        &self,
+        cache_dir: &Path,
+        source_dir: &Path,
+    ) -> Option<PathBuf> {
+        let crate_name = Self::parse_crate_name(source_dir).ok()?;
+        let lib_name = format!("lib{}.dylib", crate_name.replace('-', "_"));
+
+        // 1. Find the final artifact
+        let artifact = cache_dir.join("plugins").join(&lib_name);
+        if !artifact.exists() {
+            return None;
+        }
+
+        // 2. Find the dep file
+        let is_release = !cfg!(debug_assertions);
+        let profile = if is_release { "release" } else { "debug" };
+        let dep_file = cache_dir.join("target").join(profile).join(
+            format!("lib{}.d", crate_name.replace('-', "_")),
+        );
+        if !dep_file.exists() {
+            return None;
+        }
+
+        // 3. Get artifact mtime
+        let artifact_mtime = std::fs::metadata(&artifact).ok()?.modified().ok()?;
+
+        // 4. Check Cargo.toml mtime (catches dependency changes not in dep file)
+        let cargo_toml = source_dir.join("Cargo.toml");
+        if let Ok(meta) = std::fs::metadata(&cargo_toml) {
+            if let Ok(mtime) = meta.modified() {
+                if mtime > artifact_mtime {
+                    return None;
+                }
+            }
+        }
+
+        // 5. Parse dep file and check all dependency mtimes
+        let dep_contents = std::fs::read_to_string(&dep_file).ok()?;
+        let deps = Self::parse_dep_file(&dep_contents)?;
+
+        for dep_path in deps {
+            match std::fs::metadata(&dep_path) {
+                Ok(meta) => {
+                    if let Ok(mtime) = meta.modified() {
+                        if mtime > artifact_mtime {
+                            return None; // Source newer than artifact
+                        }
+                    }
+                }
+                Err(_) => return None, // File missing → rebuild
+            }
+        }
+
+        Some(artifact)
+    }
+
+    /// Parse a Makefile-format dep file. Returns the list of dependency paths
+    /// (everything after the first `:`).
+    ///
+    /// Format: `<output>: <dep1> <dep2> ...`
+    /// Paths may contain escaped spaces (`\ `), and lines may be continued with `\`.
+    fn parse_dep_file(contents: &str) -> Option<Vec<PathBuf>> {
+        // Join continuation lines (trailing backslash)
+        let joined = contents.replace("\\\n", " ");
+
+        // Find the colon separator (first `:` not preceded by a drive letter on Windows)
+        let colon_pos = joined.find(": ")?;
+        let deps_str = &joined[colon_pos + 2..];
+
+        // Split on whitespace, but handle escaped spaces
+        let mut deps = Vec::new();
+        let mut current = String::new();
+
+        let chars: Vec<char> = deps_str.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == ' ' {
+                // Escaped space — part of the path
+                current.push(' ');
+                i += 2;
+            } else if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '\n' {
+                // Line continuation — skip
+                i += 2;
+            } else if chars[i].is_whitespace() {
+                if !current.is_empty() {
+                    deps.push(PathBuf::from(&current));
+                    current.clear();
+                }
+                i += 1;
+            } else {
+                current.push(chars[i]);
+                i += 1;
+            }
+        }
+        if !current.is_empty() {
+            deps.push(PathBuf::from(&current));
+        }
+
+        Some(deps)
     }
 
     // =========================================================================
@@ -542,6 +654,49 @@ mod tests {
         println!("rustc: {:?}", compiler.rustc);
         println!("sysroot: {:?}", compiler.sysroot);
         println!("std dylib: {:?}", compiler.std_dylib);
+    }
+
+    #[test]
+    fn test_parse_dep_file_simple() {
+        let contents = "/path/to/output.dylib: /path/to/src/lib.rs /path/to/src/main.rs";
+        let deps = Compiler::parse_dep_file(contents).unwrap();
+        assert_eq!(deps, vec![
+            PathBuf::from("/path/to/src/lib.rs"),
+            PathBuf::from("/path/to/src/main.rs"),
+        ]);
+    }
+
+    #[test]
+    fn test_parse_dep_file_continuation() {
+        let contents = "/path/to/output.dylib: /path/to/src/lib.rs \\\n/path/to/src/main.rs";
+        let deps = Compiler::parse_dep_file(contents).unwrap();
+        assert_eq!(deps, vec![
+            PathBuf::from("/path/to/src/lib.rs"),
+            PathBuf::from("/path/to/src/main.rs"),
+        ]);
+    }
+
+    #[test]
+    fn test_parse_dep_file_escaped_spaces() {
+        let contents = "/path/output.dylib: /path/my\\ file.rs /path/other.rs";
+        let deps = Compiler::parse_dep_file(contents).unwrap();
+        assert_eq!(deps, vec![
+            PathBuf::from("/path/my file.rs"),
+            PathBuf::from("/path/other.rs"),
+        ]);
+    }
+
+    #[test]
+    fn test_parse_dep_file_empty() {
+        let contents = "/path/output.dylib: ";
+        let deps = Compiler::parse_dep_file(contents).unwrap();
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dep_file_no_colon() {
+        let contents = "no colon here";
+        assert!(Compiler::parse_dep_file(contents).is_none());
     }
 
     #[test]

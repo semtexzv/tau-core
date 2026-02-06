@@ -248,7 +248,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-COMP-002: Dep-file fast path — skip cargo when sources unchanged [ ]
+### US-COMP-002: Dep-file fast path — skip cargo when sources unchanged [x]
 
 **Description:** `compile_plugin()` always invokes `cargo build`, even when nothing has changed. A no-op cargo build takes ~265ms (manifest parsing, lockfile resolution, patch injection, fingerprinting). Cargo emits `.d` dep files in Makefile format listing every source file that contributed to the final artifact. By parsing the dep file and checking mtimes, we can skip cargo entirely when no sources have changed (~13ms).
 
@@ -261,7 +261,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Edge case: `Cargo.toml` and `Cargo.lock` changes (new dependency added) are NOT in the dep file. Consider also checking `Cargo.toml` mtime against the artifact.
 
 **Acceptance Criteria:**
-- [ ] Add a method `check_up_to_date(&self, cache_dir: &Path, source_dir: &Path) -> Option<PathBuf>` to `Compiler` that:
+- [x] Add a method `check_up_to_date(&self, cache_dir: &Path, source_dir: &Path) -> Option<PathBuf>` to `Compiler` that:
   1. Finds the final artifact in `<cache_dir>/plugins/lib<crate>.dylib`
   2. Finds the dep file at `<cache_dir>/target/<profile>/lib<crate>.d`
   3. If either doesn't exist → return `None` (needs build)
@@ -270,10 +270,10 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
   6. Also checks `<source_dir>/Cargo.toml` mtime against the artifact (catches dependency changes not in the dep file)
   7. Stats every listed dependency — if ANY is newer than the artifact, or missing → return `None`
   8. If all deps are older → return `Some(artifact_path)` (skip cargo)
-- [ ] `compile_plugin()` calls `check_up_to_date()` before invoking cargo. If it returns `Some(path)`, print `[Compiler] Plugin up-to-date (skipped): <path>` and return immediately
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
-- [ ] Manually verify: `./dist/run.sh --plugin plugins/example-plugin` twice — second run prints "up-to-date" and is measurably faster
+- [x] `compile_plugin()` calls `check_up_to_date()` before invoking cargo. If it returns `Some(path)`, print `[Compiler] Plugin up-to-date (skipped): <path>` and return immediately
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
+- [x] Manually verify: `./dist/run.sh --plugin plugins/example-plugin` twice — second run prints "up-to-date" and is measurably faster
 
 ---
 
