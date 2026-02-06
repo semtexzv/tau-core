@@ -584,3 +584,23 @@
   - ReadableFuture/WritableFuture are thin wrappers — could be replaced by async fn in edition 2024 but named types are more flexible
 ---
 ## Task self-review PASSED
+
+## Iteration 7 - US-018: Add make_ffi_waker utility and refactor tau-tokio to use it
+- What was done:
+  - Renamed `ffi_waker_from_cx` to `make_ffi_waker` in `crates/tau-rt/src/io.rs` (canonical utility)
+  - Removed 6 duplicate `make_ffi_waker` method implementations from `crates/tau-tokio/src/net/mod.rs` (TcpStream, OwnedReadHalf, OwnedWriteHalf, ConnectFuture, UnixStream, UdpSocket)
+  - Replaced all call sites with `tio::make_ffi_waker(cx)` (26 call sites)
+  - Removed unused `use tau::types::FfiWaker` import from net/mod.rs
+  - AsyncFd already used the utility internally (via `ffi_waker_from_cx`, now `make_ffi_waker`)
+  - Net reduction: -137 lines added, +57 lines = net -80 lines of duplicated code
+  - All 70 tests pass, build succeeds with only pre-existing warning
+- Files changed:
+  - `crates/tau-rt/src/io.rs` — renamed ffi_waker_from_cx → make_ffi_waker, updated doc comment
+  - `crates/tau-tokio/src/net/mod.rs` — removed 6 duplicate methods, updated 26 call sites
+  - `PRD.md` — marked US-018 acceptance criteria and header complete
+- Learnings for future iterations:
+  - The waker boxing pattern (clone → Box::into_raw → extern "C" wake_fn → Box::from_raw → wake) is now in one place
+  - `tio::make_ffi_waker(cx)` is the canonical way to get an FfiWaker from a Context — use it everywhere
+  - PRD listed 5 copies but there were actually 6 (UnixStream was the extra one)
+---
+## Task self-review PASSED

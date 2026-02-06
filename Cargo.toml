@@ -1,7 +1,10 @@
 [workspace]
-members = ["crates/*", "xtask"]
+members = ["crates/*", "xtask", "vendor/crossterm"]
 resolver = "2"
 default-members = ["crates/tau-host"]
+
+[patch.crates-io]
+tau = { path = "crates/tau" }
 
 [profile.release]
 debug = true

@@ -668,7 +668,7 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 
 ---
 
-### US-019: Vendor crossterm — initial fork with features trimmed [ ]
+### US-019: Vendor crossterm — initial fork with features trimmed [x]
 
 **Description:** As a developer, I want a vendored copy of crossterm 0.28 in the workspace with mio-related features removed, so we can replace the event system with tau's reactor.
 
@@ -680,8 +680,8 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
 > - Key: the `event-stream` feature in upstream crossterm depends on `tokio`. Our fork replaces that with `tau` + `futures-core`.
 
 **Acceptance Criteria:**
-- [ ] Copy crossterm 0.28 source to `vendor/crossterm/` (from crates.io or the old tau fork at `~/tau/vendor/crossterm/`)
-- [ ] Edit `vendor/crossterm/Cargo.toml`:
+- [x] Copy crossterm 0.28 source to `vendor/crossterm/` (from crates.io or the old tau fork at `~/tau/vendor/crossterm/`)
+- [x] Edit `vendor/crossterm/Cargo.toml`:
   - Remove `mio`, `signal-hook`, `signal-hook-mio` from `[dependencies]`
   - Remove the `events` feature (which pulls in mio)
   - Change `default` feature to `["bracketed-paste"]` (no `events`, no `windows`)
@@ -689,10 +689,10 @@ Restructure the cache into a two-level hierarchy: **environment hash** → **plu
   - Add `futures-core = { version = "0.3", optional = true }` dependency
   - Change `event-stream` feature to `["dep:futures-core"]`
   - Keep `use-dev-tty` and `bracketed-paste` features as-is
-- [ ] Add `crossterm = vendor/crossterm` to `patches.list`
-- [ ] The crate compiles with `default-features = false, features = ["bracketed-paste"]` (no event system yet — that comes in the next story)
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Add `crossterm = vendor/crossterm` to `patches.list`
+- [x] The crate compiles with `default-features = false, features = ["bracketed-paste"]` (no event system yet — that comes in the next story)
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 

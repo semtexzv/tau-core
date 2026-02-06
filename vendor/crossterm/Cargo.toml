@@ -1,0 +1,71 @@
+[package]
+name = "crossterm"
+version = "0.28.0"
+authors = ["T. Post"]
+description = "A crossplatform terminal library for manipulating terminals."
+repository = "https://github.com/crossterm-rs/crossterm"
+documentation = "https://docs.rs/crossterm/"
+license = "MIT"
+keywords = ["event", "color", "cli", "input", "terminal"]
+exclude = ["target", "Cargo.lock"]
+readme = "README.md"
+edition = "2021"
+rust-version = "1.63.0"
+categories = ["command-line-interface", "command-line-utilities"]
+
+[lib]
+name = "crossterm"
+path = "src/lib.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+
+#
+# Features
+#
+[features]
+default = ["bracketed-paste"]
+bracketed-paste = []
+event-stream = ["dep:futures-core"]
+use-dev-tty = ["filedescriptor"]
+serde = ["dep:serde", "bitflags/serde"]
+
+#
+# Shared dependencies
+#
+[dependencies]
+bitflags = { version = "2.3" }
+parking_lot = "0.12"
+tau = { version = "0.1" }
+
+# optional deps
+futures-core = { version = "0.3", optional = true, default-features = false }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+#
+# Windows dependencies
+#
+[target.'cfg(windows)'.dependencies.winapi]
+version = "0.3.9"
+features = ["winuser", "winerror"]
+optional = true
+
+[target.'cfg(windows)'.dependencies]
+crossterm_winapi = { version = "0.9.1", optional = true }
+
+#
+# UNIX dependencies
+#
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", default-features = false, optional = true }
+rustix = { version = "0.38.34", default-features = false, features = [
+    "std",
+    "stdio",
+    "termios",
+] }
+filedescriptor = { version = "0.8", optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"
+serial_test = "2.0.0"
+temp-env = "0.3.6"

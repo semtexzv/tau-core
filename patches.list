@@ -9,5 +9,6 @@
 # Plugins declare `foo = "0.1"` in their Cargo.toml; the host compiler
 # redirects that to the local source at build time.
 
-tau     = crates/tau
-tokio   = crates/tau-tokio
+tau        = crates/tau
+tokio      = crates/tau-tokio
+crossterm  = vendor/crossterm
