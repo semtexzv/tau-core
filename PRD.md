@@ -280,7 +280,7 @@ All primitives must integrate with the existing tokio shim so that crates like `
 
 ---
 
-### US-009: Synchronous combinators — `map`, `filter`, `filter_map`, `take_while` [ ]
+### US-009: Synchronous combinators — `map`, `filter`, `filter_map`, `take_while` [x]
 
 **Description:** As a plugin developer, I want to transform and filter streams so I can build data pipelines without manual poll loops.
 
@@ -291,16 +291,16 @@ All primitives must integrate with the existing tokio shim so that crates like `
 > - Key: each combinator struct must implement `Stream`. The `StreamExt` trait just provides the constructor method. Keep structs in separate files or one `combinators.rs`.
 
 **Acceptance Criteria:**
-- [ ] Create `crates/tau/src/stream/combinators.rs` (or keep in `stream.rs` if small enough)
-- [ ] `StreamExt` trait with default method implementations (extension trait on `futures_core::Stream`):
+- [x] Create `crates/tau/src/stream/combinators.rs` (or keep in `stream.rs` if small enough)
+- [x] `StreamExt` trait with default method implementations (extension trait on `futures_core::Stream`):
   - `fn map<F, B>(self, f: F) -> Map<Self, F>` where `F: FnMut(Self::Item) -> B`
   - `fn filter<F>(self, f: F) -> Filter<Self, F>` where `F: FnMut(&Self::Item) -> bool`
   - `fn filter_map<F, B>(self, f: F) -> FilterMap<Self, F>` where `F: FnMut(Self::Item) -> Option<B>`
   - `fn take_while<F>(self, f: F) -> TakeWhile<Self, F>` where `F: FnMut(&Self::Item) -> bool`
-- [ ] Each combinator is a struct implementing `Stream`, with correct `Pin` projections
-- [ ] All combinators are `Send` when the underlying stream and closure are `Send`
-- [ ] `cargo build` succeeds for the workspace
-- [ ] Existing tests still pass
+- [x] Each combinator is a struct implementing `Stream`, with correct `Pin` projections
+- [x] All combinators are `Send` when the underlying stream and closure are `Send`
+- [x] `cargo build` succeeds for the workspace
+- [x] Existing tests still pass
 
 ---
 
