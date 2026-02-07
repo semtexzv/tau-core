@@ -21,6 +21,7 @@
 //! - SIGCHLD handling
 //! - Plugin lifecycle management
 
+pub mod sync;
 pub mod executor;
 pub mod reactor;
 pub mod resources;

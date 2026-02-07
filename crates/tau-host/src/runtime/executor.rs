@@ -69,14 +69,12 @@
 //! - `waker_wake` on the fast path (same-thread) directly accesses EXECUTORS
 //!   via UnsafeCell. This is safe because it's only called outside with_executor.
 
-use std::cell::UnsafeCell;
 use std::collections::{HashMap, VecDeque};
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::task::{Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
-use crossbeam_queue::SegQueue;
+use super::sync::{AtomicU16, AtomicU64, Ordering, UnsafeCell, RemoteQueue, thread};
 
 // =============================================================================
 // Constants
@@ -180,10 +178,10 @@ pub struct TimerEntry {
 pub struct Executor {
     pub segments: Vec<Segment>,
     pub ready: VecDeque<u32>,
-    pub remote: SegQueue<u32>,
+    pub remote: RemoteQueue<u32>,
     pub free: Vec<u32>,
     pub hot_slot: Option<u32>,
-    pub owner: Option<std::thread::Thread>,
+    pub owner: Option<thread::Thread>,
     pub timers: Option<HashMap<u64, TimerEntry>>,
     pub next_timer_handle: u64,
 }
@@ -194,7 +192,7 @@ impl Executor {
             segments: Vec::new(),
             ready: VecDeque::new(),
             free: Vec::new(),
-            remote: SegQueue::new(),
+            remote: RemoteQueue::new(),
             hot_slot: None,
             owner: None,
             timers: None,
@@ -205,7 +203,7 @@ impl Executor {
     fn init(&mut self) {
         self.ready = VecDeque::with_capacity(SEGMENT_SIZE);
         self.free = Vec::with_capacity(SEGMENT_SIZE);
-        self.owner = Some(std::thread::current());
+        self.owner = Some(thread::current());
         self.timers = Some(HashMap::new());
         if self.segments.is_empty() {
             self.segments.push(Box::new([const { TaskSlot::new() }; SEGMENT_SIZE]));
