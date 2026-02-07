@@ -24,6 +24,55 @@ patches.list     # single source of truth for crate patches (used by compiler.rs
 
 This split is **load-bearing**. If `tau` were a dylib, all plugins would share a single `PLUGIN_GUARD` static, breaking per-plugin identity.
 
+### Executor Lives in tau-host, NOT tau-rt
+
+**This is intentional and load-bearing.**
+
+The slab-based async executor implementation lives in `tau-host/src/runtime/executor.rs`, NOT in `tau-rt`. tau-rt contains only thin wrappers that call `extern "Rust"` functions provided by the host.
+
+**Why?** When plugins compile against tau-rt (provided as a prebuilt dylib via `--extern`), Rust needs the rmeta metadata for ALL of tau-rt's dependencies. If tau-rt depended on `crossbeam-queue` (needed for lock-free cross-thread wakes), plugin compilation would fail:
+
+```text
+error[E0463]: can't find crate for `crossbeam_queue` which `tau_rt` depends on
+```
+
+**The solution:**
+- `tau-rt` is **dependency-free** (only std) — plugins can compile against it
+- `tau-host` contains the full executor with crossbeam-queue, statically linked
+- tau-rt declares `extern "Rust" { fn tau_exec_*(...); }` functions
+- tau-host exports these functions with `#[no_mangle] pub extern "Rust"`
+- At runtime, plugin calls route through tau-rt → host
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                      Plugin (cdylib)                         │
+│  spawn(), JoinHandle, sleep() — monomorphized from tau      │
+└─────────────────────────────┬───────────────────────────────┘
+                              │ calls
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    tau-rt (dylib)                            │
+│  - Thin wrappers: executor::alloc_raw() → tau_exec_alloc_raw │
+│  - NO external dependencies (only std)                      │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ extern "Rust" calls
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      tau-host (binary)                       │
+│  - Full executor: slab, wakers, timers, crossbeam-queue     │
+│  - Exports tau_exec_* functions                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**When modifying the executor:**
+- Implementation changes go in `tau-host/src/runtime/executor.rs`
+- If adding a new extern function:
+  1. Add `#[no_mangle] pub extern "Rust" fn tau_exec_*` in tau-host
+  2. Add `extern "Rust" { fn tau_exec_*; }` declaration in tau-rt
+  3. Add to `ensure_executor_exports_linked()` to prevent linker stripping
+  4. Add a thin wrapper function in tau-rt's executor.rs
+- The host's `ensure_executor_exports_linked()` MUST be called from main() — otherwise the linker strips the tau_exec_* symbols as unused
+
 ### patches.list
 
 `patches.list` at the workspace root is the single source of truth for which crates get patched into plugin builds. It's used by:

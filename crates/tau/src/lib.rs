@@ -41,6 +41,7 @@
 // Re-export tau-rt as `tau::rt`
 // =============================================================================
 
+extern crate tau_rt;
 /// Runtime API — re-exported from the shared `tau-rt` dylib.
 ///
 /// Contains `spawn`, `sleep`, `JoinHandle`, `block_on`, `drive`, `init`.
@@ -78,5 +79,4 @@ pub use guard::{PluginGuard, PluginBox, PluginArc, PluginFn};
 pub use rt::types;
 pub use rt::io;
 pub use rt::resource;
-pub use rt::event;
 pub use rt::process;

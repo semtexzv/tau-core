@@ -2,11 +2,12 @@
 name = "tau-rt"
 version = "0.1.0"
 edition = "2021"
-description = "Tau shared runtime — dynamic library linked by all plugins"
-build = "build.rs"
+description = "Tau shared runtime — thin dylib wrapper, implementation in host"
 
 [lib]
 crate-type = ["dylib"]
 
+# NO DEPENDENCIES - this is intentional!
+# tau-rt must be dependency-free so plugins can compile against it.
+# See executor.rs for the full explanation.
 [dependencies]
-# No external dependencies — tau-rt is self-contained

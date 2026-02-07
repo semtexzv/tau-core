@@ -1,31 +1,58 @@
-//! Tau Runtime — shared dynamic library
+//! Tau Runtime — thin dylib wrapper over host-provided executor.
 //!
-//! This crate is compiled as a **dylib**: one copy is loaded into the process,
-//! shared by the host and all plugins. It provides the core runtime API:
+//! # Architecture
 //!
-//! - **Task spawning**: [`spawn`], [`block_on`], [`JoinHandle`]
-//! - **Timers**: [`sleep`], [`SleepFuture`]
-//! - **Resources**: [`resource`] — typed key-value store across plugins
-//! - **Events**: [`event`] — typed pub-sub event bus
-//! - **IO**: [`io`] — reactor integration for async file descriptors
-//! - **FFI types**: [`types`] — `FfiPoll`, `FfiWaker`, `RawPollFn`, `RawDropFn`
+//! tau-rt is a **dependency-free dylib** that plugins compile against.
+//! The actual executor implementation lives in `tau-host`. This split is
+//! intentional — see `executor.rs` for the full explanation.
 //!
-//! All runtime calls resolve at load time to symbols exported by the host binary
-//! via dynamic linking (`-Wl,-undefined,dynamic_lookup` + `-rdynamic`).
-//!
-//! # Not in this crate
-//!
-//! Per-plugin types (`PluginGuard`, `PluginBox`, `PluginArc`, `PluginFn`,
-//! `define_plugin!`) live in the `tau` rlib crate, which is statically compiled
-//! into each plugin's cdylib. This gives each plugin its own copy of the statics,
-//! enabling per-plugin guard storage.
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                      Plugin (cdylib)                         │
+//! │  ┌─────────────────────────────────────────────────────────┐│
+//! │  │  spawn(), JoinHandle, sleep() — monomorphized from tau  ││
+//! │  └──────────────────────────┬──────────────────────────────┘│
+//! └─────────────────────────────┼───────────────────────────────┘
+//!                               │ calls
+//!                               ▼
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                    tau-rt (dylib, THIS CRATE)                │
+//! │  - Thin wrappers around extern "Rust" declarations          │
+//! │  - NO external dependencies (only std)                      │
+//! │  - Generic spawn/JoinHandle/block_on monomorphize here      │
+//! └──────────────────────────────┬──────────────────────────────┘
+//!                                │ extern "Rust" calls
+//!                                ▼
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                      tau-host (binary)                       │
+//! │  - Full executor implementation with crossbeam-queue        │
+//! │  - IO reactor, resource registry, plugin management         │
+//! │  - Exports #[no_mangle] tau_exec_* functions                │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
 
+pub mod ffi;
+pub mod executor;
 mod runtime;
 pub mod types;
 pub mod io;
 pub mod resource;
-pub mod event;
 pub mod process;
 
 pub use runtime::*;
 pub use types::*;
+
+// Re-export executor items for convenience
+pub use executor::{
+    allocate_plugin_id,
+    set_current_plugin,
+    clear_current_plugin,
+    current_plugin_id,
+    drop_plugin_tasks,
+    wait_for_task,
+    debug_enabled,
+    debug_stats,
+    pack_task_id,
+    unpack_task_id,
+    CURRENT_PLUGIN,
+};

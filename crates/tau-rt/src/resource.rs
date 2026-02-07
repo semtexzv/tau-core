@@ -26,41 +26,15 @@
 
 use std::any::TypeId;
 
-// FFI — resolved at load time from host
-extern "C" {
-    fn tau_resource_put(
-        name_ptr: *const u8,
-        name_len: usize,
-        ptr: *mut (),
-        type_id: u128,
-        plugin_id: u64,
-        drop_fn: unsafe extern "C" fn(*mut ()),
-    );
-
-    fn tau_resource_get(
-        name_ptr: *const u8,
-        name_len: usize,
-        type_id: u128,
-    ) -> *const ();
-
-    fn tau_resource_take(
-        name_ptr: *const u8,
-        name_len: usize,
-        type_id: u128,
-    ) -> *mut ();
-}
+use crate::ffi::{tau_resource_put, tau_resource_get, tau_resource_take};
 
 fn type_id_bits<T: 'static>() -> u128 {
     unsafe { std::mem::transmute(TypeId::of::<T>()) }
 }
 
-extern "C" {
-    fn tau_current_plugin_id() -> u64;
-}
-
-/// Get the active plugin ID from the host.
+/// Get the active plugin ID from the executor.
 fn current_plugin() -> u64 {
-    unsafe { tau_current_plugin_id() }
+    crate::executor::current_plugin_id()
 }
 
 /// Store a resource in the global registry.

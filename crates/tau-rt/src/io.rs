@@ -13,28 +13,10 @@ pub const WRITABLE: u8 = 0b10;
 pub const DIR_READ: u8 = 0;
 pub const DIR_WRITE: u8 = 1;
 
-// FFI declarations — these are exported by the host
-extern "C" {
-    /// Register a file descriptor with the IO reactor.
-    /// Returns a handle (token) for use in other reactor calls.
-    /// Returns 0 on error.
-    pub fn tau_io_register(fd: RawFd, interest: u8) -> u64;
-
-    /// Poll for IO readiness in a direction.
-    /// direction: 0 = read, 1 = write
-    /// Returns: 1 if ready, 0 if pending (waker stored)
-    pub fn tau_io_poll_ready(handle: u64, direction: u8, waker: FfiWaker) -> u8;
-
-    /// Clear readiness for a direction (call after WouldBlock).
-    pub fn tau_io_clear_ready(handle: u64, direction: u8);
-
-    /// Deregister a file descriptor from the reactor.
-    pub fn tau_io_deregister(handle: u64);
-
-    /// Poll the reactor for events (blocking up to timeout).
-    /// millis: timeout in milliseconds.
-    pub fn tau_react(millis: u64);
-}
+// Re-export FFI functions from centralized ffi module
+use crate::ffi::{
+    tau_io_register, tau_io_poll_ready, tau_io_clear_ready, tau_io_deregister, tau_react,
+};
 
 /// Safe wrapper: register a fd with the reactor.
 pub fn register(fd: RawFd, interest: u8) -> Option<u64> {

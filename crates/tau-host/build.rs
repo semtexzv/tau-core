@@ -1,43 +1,80 @@
+use std::process::Command;
+
 fn main() {
-    // Capture full rustc version (includes channel and commit hash)
-    let output = std::process::Command::new("rustc")
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/tls.c");
+
+    // Compile C thread-local wrapper for fast executor index access.
+    // This provides tls_get_executor, tls_set_executor, tls_is_current_executor
+    // which are used by the executor for O(1) thread-local executor lookup.
+    cc::Build::new()
+        .file("src/tls.c")
+        .compile("tls");
+
+    // Capture build environment for same-compiler verification
+    capture_rustc_version();
+    capture_rustflags();
+    capture_target();
+    capture_panic_strategy();
+    capture_target_features();
+}
+
+fn capture_rustc_version() {
+    let output = Command::new("rustc")
         .arg("-V")
         .output()
-        .expect("Failed to execute rustc");
+        .expect("Failed to run rustc -V");
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    println!("cargo:rustc-env=HOST_RUSTC_VERSION={}", version);
+}
 
-    let version = String::from_utf8(output.stdout).expect("Invalid utf8");
-    println!("cargo:rustc-env=HOST_RUSTC_VERSION={}", version.trim());
+fn capture_rustflags() {
+    let flags = std::env::var("CARGO_ENCODED_RUSTFLAGS")
+        .or_else(|_| std::env::var("RUSTFLAGS"))
+        .unwrap_or_default();
+    println!("cargo:rustc-env=HOST_RUSTFLAGS={}", flags);
+}
 
-    // Capture RUSTFLAGS (0x1f unit separator encoding)
-    if let Ok(flags) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
-        println!("cargo:rustc-env=HOST_RUSTFLAGS={}", flags);
-    } else if let Ok(flags) = std::env::var("RUSTFLAGS") {
-        let encoded = flags.split_whitespace().collect::<Vec<_>>().join("\x1f");
-        println!("cargo:rustc-env=HOST_RUSTFLAGS={}", encoded);
-    } else {
-        println!("cargo:rustc-env=HOST_RUSTFLAGS=");
-    }
-
-    // Capture TARGET
-    let target = std::env::var("TARGET").expect("TARGET not set");
+fn capture_target() {
+    let target = std::env::var("TARGET").unwrap_or_else(|_| {
+        // Fallback: query rustc for default target
+        let output = Command::new("rustc")
+            .args(["--version", "--verbose"])
+            .output()
+            .expect("Failed to run rustc");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .lines()
+            .find(|l| l.starts_with("host:"))
+            .map(|l| l.trim_start_matches("host:").trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
     println!("cargo:rustc-env=HOST_TARGET={}", target);
+}
 
-    // Capture PANIC strategy
-    let panic = std::env::var("CARGO_CFG_PANIC").unwrap_or_else(|_| "unwind".to_string());
+fn capture_panic_strategy() {
+    // Default to "unwind" unless explicitly set to "abort"
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let panic = if profile == "release" {
+        std::env::var("CARGO_PROFILE_RELEASE_PANIC").unwrap_or_else(|_| "unwind".to_string())
+    } else {
+        std::env::var("CARGO_PROFILE_DEV_PANIC").unwrap_or_else(|_| "unwind".to_string())
+    };
     println!("cargo:rustc-env=HOST_PANIC={}", panic);
+}
 
-    // Capture target features
+fn capture_target_features() {
+    // Capture target CPU features for plugin compilation
     let features = std::env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
-    println!("cargo:rustc-env=HOST_TARGET_FEATURES={}", features);
-
-    // Export symbols so plugins can resolve them at load time.
-    // macOS: -export_dynamic makes the executable's symbols visible to dlopen'd libs.
-    // Linux: -rdynamic does the same for ELF.
-    #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-arg=-Wl,-export_dynamic");
-    #[cfg(target_os = "linux")]
-    println!("cargo:rustc-link-arg=-rdynamic");
-
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../patches.list");
+    // Format: comma-separated list → space-separated with + prefix
+    let formatted = if features.is_empty() {
+        String::new()
+    } else {
+        features
+            .split(',')
+            .map(|f| format!("+{}", f.trim()))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    println!("cargo:rustc-env=HOST_TARGET_FEATURES={}", formatted);
 }

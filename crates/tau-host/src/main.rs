@@ -124,12 +124,6 @@ impl Drop for AsyncPlugin {
             println!("[Host] Dropped {} tasks from plugin {}", tasks, self.plugin_id);
         }
 
-        // 3. Drop all event subscriptions (callback ctx dropped, plugin still loaded)
-        let events = runtime::drop_plugin_events(self.plugin_id);
-        if events > 0 {
-            println!("[Host] Dropped {} event subscriptions from plugin {}", events, self.plugin_id);
-        }
-
         // 4. Drop all resources owned by this plugin (drop_fn called, plugin still loaded)
         let resources = runtime::drop_plugin_resources(self.plugin_id);
         if resources > 0 {
@@ -271,6 +265,9 @@ fn discover_plugins() -> Vec<PathBuf> {
 // =============================================================================
 
 fn main() {
+    // Ensure executor exports are linked (prevents linker from stripping them)
+    crate::runtime::executor::ensure_executor_exports_linked();
+    
     let args: Vec<String> = std::env::args().collect();
 
     let exe_path = std::env::current_exe().expect("Failed to get exe path");

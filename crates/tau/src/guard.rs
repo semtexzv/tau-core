@@ -507,17 +507,29 @@ impl_plugin_box_fn!(a: A, b: B, c: C, d: D);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::cell::Cell;
 
-    // Track whether the "dlclose" callback was invoked
-    static UNLOADED: AtomicBool = AtomicBool::new(false);
+    // Track whether the "dlclose" callback was invoked.
+    // Thread-local to avoid races when tests run in parallel.
+    thread_local! {
+        static UNLOADED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn get_unloaded() -> bool {
+        UNLOADED.with(|u| u.get())
+    }
+
+    fn set_unloaded(val: bool) {
+        UNLOADED.with(|u| u.set(val));
+    }
 
     unsafe fn mock_dlclose(_handle: *mut ()) {
-        UNLOADED.store(true, Ordering::SeqCst);
+        set_unloaded(true);
     }
 
     fn mock_guard() -> PluginGuard {
-        UNLOADED.store(false, Ordering::SeqCst);
+        set_unloaded(false);
         unsafe { PluginGuard::new(0x1234 as *mut (), mock_dlclose, 1) }
     }
 
@@ -539,16 +551,16 @@ mod tests {
 
     #[test]
     fn guard_calls_drop_fn_on_last_drop() {
-        UNLOADED.store(false, Ordering::SeqCst);
+        set_unloaded(false);
         {
             let g = mock_guard();
             let _g2 = g.clone();
             drop(g);
             // Still one clone alive
-            assert!(!UNLOADED.load(Ordering::SeqCst));
+            assert!(!get_unloaded());
         }
         // Both dropped → dlclose called
-        assert!(UNLOADED.load(Ordering::SeqCst));
+        assert!(get_unloaded());
     }
 
     #[test]
@@ -585,14 +597,14 @@ mod tests {
 
     #[test]
     fn plugin_box_keeps_plugin_alive() {
-        UNLOADED.store(false, Ordering::SeqCst);
+        set_unloaded(false);
         let guard = mock_guard();
         let b = PluginBox::new(Box::new(42), guard.clone());
         drop(guard);
         // PluginBox still holds a clone
-        assert!(!UNLOADED.load(Ordering::SeqCst));
+        assert!(!get_unloaded());
         drop(b);
-        assert!(UNLOADED.load(Ordering::SeqCst));
+        assert!(get_unloaded());
     }
 
     // ── PluginArc ──
@@ -639,14 +651,14 @@ mod tests {
 
     #[test]
     fn plugin_fn_keeps_plugin_alive() {
-        UNLOADED.store(false, Ordering::SeqCst);
+        set_unloaded(false);
         fn noop() {}
         let guard = mock_guard();
         let f = PluginFn::new(noop as fn(), guard.clone());
         drop(guard);
-        assert!(!UNLOADED.load(Ordering::SeqCst));
+        assert!(!get_unloaded());
         drop(f);
-        assert!(UNLOADED.load(Ordering::SeqCst));
+        assert!(get_unloaded());
     }
 
     // ── FnOnce ──
@@ -734,13 +746,13 @@ mod tests {
 
     #[test]
     fn fn_once_guard_alive_during_call() {
-        UNLOADED.store(false, Ordering::SeqCst);
+        set_unloaded(false);
         let guard = mock_guard();
 
         let f: PluginBox<dyn FnOnce() -> bool> = PluginBox::new(
             Box::new(|| {
                 // During the call, the guard from PluginBox is still alive
-                !UNLOADED.load(Ordering::SeqCst)
+                !get_unloaded()
             }),
             guard.clone(),
         );
@@ -749,6 +761,6 @@ mod tests {
         let was_alive = f.call_once();
         assert!(was_alive, "plugin should be alive during the call");
         // Now the PluginBox is consumed → guard drops → dlclose
-        assert!(UNLOADED.load(Ordering::SeqCst));
+        assert!(get_unloaded());
     }
 }

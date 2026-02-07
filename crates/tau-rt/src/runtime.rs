@@ -1,349 +1,269 @@
-//! Runtime interface — extern declarations resolved at load time from host.
+//! Public runtime API — spawn, JoinHandle, block_on, sleep.
 //!
-//! Plugins call these wrappers. The actual implementations live in the host binary
-//! and are resolved via dynamic linking (-Wl,-undefined,dynamic_lookup + -rdynamic).
+//! Generic functions here are monomorphized into each plugin (via dylib rmeta).
+//! They type-erase futures into the executor's slab slots. Non-generic executor
+//! core functions are resolved from the shared dylib at load time.
 //!
-//! # Cross-plugin safety of spawn / JoinHandle
+//! # JoinHandle lifecycle
 //!
-//! A `JoinHandle<T>` must NOT be sent to another plugin. It contains function
-//! pointers (the `TaskVtable`) that point into the spawning plugin's `.text`
-//! section. If the spawning plugin is unloaded, those pointers dangle.
-//!
-//! To get a result from Plugin A to Plugin B, spawn the work in Plugin A and
-//! send the **concrete result `T`** through a channel or resource. The `T` itself
-//! is safe to send — every plugin has its own copy of `T`'s drop glue and the
-//! same allocator. Only the dynamic dispatch wrappers (vtable, poll_fn) are unsafe
-//! to share.
+//! - `await` → polls until complete, takes result, frees slot
+//! - `cancel()` → drops future, frees slot
+//! - `drop` (without await) → marks detached; auto-cleanup on completion
+//! - `task_id()` → packed (gen, slot_id) for FFI / host block_on
 
-use crate::types::{FfiPoll, FfiWaker, RawDropFn, RawPollFn};
-use std::cell::UnsafeCell;
+use crate::executor::{self, DeallocFn, DropFutureFn, DropResultFn, PollFn, ReadFn};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::pin::Pin;
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 // =============================================================================
-// Extern declarations — symbols provided by the host binary
+// IO reactor FFI (provided by host)
 // =============================================================================
 
-extern "C" {
-    fn tau_runtime_init() -> i32;
-    fn tau_spawn(future_ptr: *mut (), poll_fn: RawPollFn, drop_fn: RawDropFn) -> u64;
-    #[allow(dead_code)]
-    fn tau_block_on(task_id: u64);
-    fn tau_drive() -> u32;
-    fn tau_timer_create(nanos_from_now: u64) -> u64;
-    fn tau_timer_check(handle: u64) -> u8;
-    fn tau_timer_cancel(handle: u64);
-    fn tau_task_abort(task_id: u64) -> u8;
-    fn tau_task_is_finished(task_id: u64) -> u8;
+use crate::ffi::tau_react;
+
+// =============================================================================
+// Payload union — stores either the future or its result in the same memory
+// =============================================================================
+
+union Payload<F, T> {
+    future: ManuallyDrop<F>,
+    result: ManuallyDrop<T>,
 }
 
 // =============================================================================
-// Public API
+// Type-erased poll/drop/read functions (monomorphized per F, T)
 // =============================================================================
 
-/// Initialize the runtime.
-pub fn init() -> Result<(), i32> {
-    let result = unsafe { tau_runtime_init() };
-    if result == 0 { Ok(()) } else { Err(result) }
-}
+// --- Inline (future stored in slot storage) ---
 
-/// Drive the runtime (poll ready tasks, fire timers). Returns tasks completed.
-pub fn drive() -> u32 {
-    unsafe { tau_drive() }
-}
-
-// =============================================================================
-// Task Cell - reference counted, stores result inline (like tokio)
-// =============================================================================
-
-/// The stage of task execution.
-enum Stage<T> {
-    Running,
-    Finished(T),
-    Aborted,
-    Consumed,
-}
-
-/// Task cell - reference counted, contains result slot.
-/// Shared between JoinHandle and the running task.
-struct TaskCell<T> {
-    /// Reference count (JoinHandle + running task).
-    ref_count: AtomicUsize,
-    /// The result stage.
-    stage: UnsafeCell<Stage<T>>,
-    /// Waker to notify when complete.
-    waker: UnsafeCell<Option<Waker>>,
-    /// Whether the task is complete (for fast check without locking).
-    complete: std::sync::atomic::AtomicBool,
-}
-
-impl<T> TaskCell<T> {
-    fn new() -> *mut Self {
-        Box::into_raw(Box::new(TaskCell {
-            ref_count: AtomicUsize::new(2), // JoinHandle + WrapperFuture
-            stage: UnsafeCell::new(Stage::Running),
-            waker: UnsafeCell::new(None),
-            complete: std::sync::atomic::AtomicBool::new(false),
-        }))
-    }
-
-    /// Decrement ref count. Returns true if this was the last ref.
-    unsafe fn dec_ref(ptr: *mut Self) -> bool {
-        if (*ptr).ref_count.fetch_sub(1, Ordering::Release) == 1 {
-            std::sync::atomic::fence(Ordering::Acquire);
-            true
-        } else {
-            false
+unsafe fn poll_inline<F: Future<Output = T>, T>(ptr: *mut u8, waker: &Waker) -> Poll<()> {
+    let payload = &mut *(ptr as *mut Payload<F, T>);
+    let future = Pin::new_unchecked(&mut *payload.future);
+    let mut cx = Context::from_waker(waker);
+    match future.poll(&mut cx) {
+        Poll::Ready(v) => {
+            ManuallyDrop::drop(&mut payload.future);
+            std::ptr::write(&mut payload.result, ManuallyDrop::new(v));
+            Poll::Ready(())
         }
-    }
-
-    unsafe fn drop_cell(ptr: *mut Self) {
-        drop(Box::from_raw(ptr));
+        Poll::Pending => Poll::Pending,
     }
 }
 
-/// Vtable for type-erased task operations.
-struct TaskVtable {
-    try_read_output: unsafe fn(NonNull<()>, *mut ()),
-    set_waker: unsafe fn(NonNull<()>, Option<Waker>),
-    is_complete: unsafe fn(NonNull<()>) -> bool,
-    dec_ref: unsafe fn(NonNull<()>) -> bool,
-    drop_cell: unsafe fn(NonNull<()>),
+unsafe fn drop_inline_result<F: Future<Output = T>, T>(ptr: *mut u8) {
+    let payload = &mut *(ptr as *mut Payload<F, T>);
+    ManuallyDrop::drop(&mut payload.result);
 }
 
-/// Raw task handle - pointer + vtable, no T stored.
-struct RawTask {
-    ptr: NonNull<()>,
-    vtable: &'static TaskVtable,
+unsafe fn cancel_inline<F: Future<Output = T>, T>(ptr: *mut u8) {
+    let payload = &mut *(ptr as *mut Payload<F, T>);
+    ManuallyDrop::drop(&mut payload.future);
 }
 
-impl Clone for RawTask {
-    fn clone(&self) -> Self {
-        RawTask { ptr: self.ptr, vtable: self.vtable }
-    }
+unsafe fn read_inline<F: Future<Output = T>, T>(ptr: *mut u8) -> *mut u8 {
+    let payload = &mut *(ptr as *mut Payload<F, T>);
+    &mut *payload.result as *mut T as *mut u8
 }
-impl Copy for RawTask {}
 
-// Monomorphized vtable functions
-unsafe fn try_read_output<T>(cell_ptr: NonNull<()>, dst: *mut ()) {
-    let cell = cell_ptr.as_ptr() as *mut TaskCell<T>;
-    let stage = &mut *(*cell).stage.get();
-    let out = &mut *(dst as *mut Poll<Option<T>>);
-    
-    match std::mem::replace(stage, Stage::Consumed) {
-        Stage::Finished(result) => *out = Poll::Ready(Some(result)),
-        Stage::Aborted => *out = Poll::Ready(None),
-        Stage::Running => {
-            *stage = Stage::Running;
-            *out = Poll::Pending;
+// --- Boxed (future stored on heap, pointer in slot storage) ---
+
+unsafe fn poll_boxed<F: Future<Output = T>, T>(ptr: *mut u8, waker: &Waker) -> Poll<()> {
+    let boxed_ptr = *(ptr as *mut *mut Payload<F, T>);
+    let payload = &mut *boxed_ptr;
+    let future = Pin::new_unchecked(&mut *payload.future);
+    let mut cx = Context::from_waker(waker);
+    match future.poll(&mut cx) {
+        Poll::Ready(v) => {
+            ManuallyDrop::drop(&mut payload.future);
+            std::ptr::write(&mut payload.result, ManuallyDrop::new(v));
+            Poll::Ready(())
         }
-        Stage::Consumed => panic!("JoinHandle polled after completion"),
+        Poll::Pending => Poll::Pending,
     }
 }
 
-unsafe fn set_waker<T>(cell_ptr: NonNull<()>, waker: Option<Waker>) {
-    let cell = cell_ptr.as_ptr() as *mut TaskCell<T>;
-    *(*cell).waker.get() = waker;
+unsafe fn drop_boxed_result<F: Future<Output = T>, T>(ptr: *mut u8) {
+    let boxed_ptr = *(ptr as *mut *mut Payload<F, T>);
+    let payload = &mut *boxed_ptr;
+    ManuallyDrop::drop(&mut payload.result);
+    // Free the Box (union drop is no-op, so this just deallocates)
+    drop(Box::from_raw(boxed_ptr));
 }
 
-unsafe fn is_complete<T>(cell_ptr: NonNull<()>) -> bool {
-    let cell = cell_ptr.as_ptr() as *mut TaskCell<T>;
-    (*cell).complete.load(Ordering::Acquire)
+unsafe fn cancel_boxed<F: Future<Output = T>, T>(ptr: *mut u8) {
+    let boxed_ptr = *(ptr as *mut *mut Payload<F, T>);
+    let payload = &mut *boxed_ptr;
+    ManuallyDrop::drop(&mut payload.future);
+    drop(Box::from_raw(boxed_ptr));
 }
 
-unsafe fn dec_ref<T>(cell_ptr: NonNull<()>) -> bool {
-    TaskCell::<T>::dec_ref(cell_ptr.as_ptr() as *mut TaskCell<T>)
+unsafe fn read_boxed<F: Future<Output = T>, T>(ptr: *mut u8) -> *mut u8 {
+    let boxed_ptr = *(ptr as *mut *mut Payload<F, T>);
+    let payload = &mut *boxed_ptr;
+    &mut *payload.result as *mut T as *mut u8
 }
 
-unsafe fn drop_cell<T>(cell_ptr: NonNull<()>) {
-    TaskCell::<T>::drop_cell(cell_ptr.as_ptr() as *mut TaskCell<T>);
-}
-
-fn make_vtable<T>() -> &'static TaskVtable {
-    &TaskVtable {
-        try_read_output: try_read_output::<T>,
-        set_waker: set_waker::<T>,
-        is_complete: is_complete::<T>,
-        dec_ref: dec_ref::<T>,
-        drop_cell: drop_cell::<T>,
-    }
-}
-
-// =============================================================================
-// JoinHandle - stores raw pointer + PhantomData (like tokio)
-// =============================================================================
-
-/// Handle returned by `spawn`. Implements Future to await the task's result.
-/// 
-/// Like tokio, T is NOT stored directly - only via PhantomData.
-/// The actual T lives in the TaskCell, accessed via vtable.
-pub struct JoinHandle<T> {
-    task_id: u64,
-    raw: RawTask,
-    _marker: PhantomData<T>,
-}
-
-unsafe impl<T: Send> Send for JoinHandle<T> {}
-unsafe impl<T: Send> Sync for JoinHandle<T> {}
-impl<T> Unpin for JoinHandle<T> {}  // T is behind a pointer, not inline
-
-impl<T> JoinHandle<T> {
-    pub fn task_id(&self) -> u64 {
-        self.task_id
-    }
-
-    pub fn abort(&self) {
-        unsafe { tau_task_abort(self.task_id) };
-    }
-
-    pub fn is_finished(&self) -> bool {
-        unsafe { (self.raw.vtable.is_complete)(self.raw.ptr) }
-    }
-}
-
-// Future impl - NO 'static bound on T!
-impl<T> Future for JoinHandle<T> {
-    type Output = Option<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        if !unsafe { (self.raw.vtable.is_complete)(self.raw.ptr) } {
-            unsafe { (self.raw.vtable.set_waker)(self.raw.ptr, Some(cx.waker().clone())) };
-            return Poll::Pending;
-        }
-        
-        let mut result: Poll<Option<T>> = Poll::Pending;
-        unsafe {
-            (self.raw.vtable.try_read_output)(
-                self.raw.ptr,
-                &mut result as *mut Poll<Option<T>> as *mut (),
-            );
-        }
-        result
-    }
-}
-
-impl<T> Drop for JoinHandle<T> {
-    fn drop(&mut self) {
-        unsafe {
-            if (self.raw.vtable.dec_ref)(self.raw.ptr) {
-                (self.raw.vtable.drop_cell)(self.raw.ptr);
-            }
-        }
-    }
+unsafe fn dealloc_boxed<F: Future<Output = T>, T>(ptr: *mut u8) {
+    let boxed_ptr = *(ptr as *mut *mut Payload<F, T>);
+    // Union drop is a no-op — this just frees the heap allocation.
+    // The result T was already moved out via ptr::read.
+    drop(Box::from_raw(boxed_ptr));
 }
 
 // =============================================================================
 // spawn
 // =============================================================================
 
-/// Spawn a future as a task on the shared runtime. Returns a JoinHandle.
-pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+/// Spawn a future as a task on the executor. Returns a JoinHandle.
+///
+/// The future is stored inline if small enough (≤ INLINE_SIZE bytes),
+/// otherwise boxed on the heap with a pointer in the slot.
+pub fn spawn<F>(f: F) -> JoinHandle<F::Output>
 where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
+    F: Future + 'static,
+    F::Output: 'static,
 {
-    // Create ref-counted task cell (starts with count = 2)
-    let cell_ptr = TaskCell::<F::Output>::new();
-    
-    let raw = RawTask {
-        ptr: unsafe { NonNull::new_unchecked(cell_ptr as *mut ()) },
-        vtable: make_vtable::<F::Output>(),
-    };
-    
-    // Create wrapper future that writes result to cell
-    let wrapper = WrapperFuture {
-        future,
-        cell_ptr,
-        vtable: raw.vtable,
-    };
+    let plugin_id = executor::current_plugin_id();
+    let (id, gen, storage_ptr, executor_idx) = executor::alloc_raw();
 
-    // Type-erase for FFI
-    let boxed: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(wrapper);
-    let future_ptr = Box::into_raw(Box::new(boxed)) as *mut ();
+    let payload_size = std::mem::size_of::<Payload<F, F::Output>>();
+    let payload_align = std::mem::align_of::<Payload<F, F::Output>>();
 
-    unsafe extern "C" fn poll_erased(future_ptr: *mut (), waker: FfiWaker) -> FfiPoll {
-        let future = &mut *(future_ptr as *mut Pin<Box<dyn Future<Output = ()> + Send>>);
-        let waker = ffi_waker_to_std(waker);
-        let mut cx = Context::from_waker(&waker);
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(()) => FfiPoll::Ready,
-            Poll::Pending => FfiPoll::Pending,
-        }
-    }
-
-    unsafe extern "C" fn drop_erased(future_ptr: *mut ()) {
-        drop(Box::from_raw(
-            future_ptr as *mut Pin<Box<dyn Future<Output = ()> + Send>>,
-        ));
-    }
-
-    let task_id = unsafe { tau_spawn(future_ptr, poll_erased, drop_erased) };
-    
-    JoinHandle {
-        task_id,
-        raw,
-        _marker: PhantomData,
-    }
-}
-
-/// Wrapper future that writes result to TaskCell when complete.
-struct WrapperFuture<F: Future> {
-    future: F,
-    cell_ptr: *mut TaskCell<F::Output>,
-    vtable: &'static TaskVtable,
-}
-
-unsafe impl<F: Future + Send> Send for WrapperFuture<F> where F::Output: Send {}
-
-impl<F: Future> Future for WrapperFuture<F> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let this = unsafe { self.get_unchecked_mut() };
-        let future = unsafe { Pin::new_unchecked(&mut this.future) };
-        
-        match future.poll(cx) {
-            Poll::Ready(output) => {
-                unsafe {
-                    let cell = &*this.cell_ptr;
-                    *cell.stage.get() = Stage::Finished(output);
-                    cell.complete.store(true, Ordering::Release);
-                    
-                    if let Some(waker) = (*cell.waker.get()).take() {
-                        waker.wake();
-                    }
-                }
-                Poll::Ready(())
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<F: Future> Drop for WrapperFuture<F> {
-    fn drop(&mut self) {
+    if payload_size <= executor::INLINE_SIZE && payload_align <= 128 {
+        // Inline: write payload directly into slot storage
         unsafe {
-            let cell = &*self.cell_ptr;
-            // If the task is still running when the wrapper is dropped,
-            // it means the task was aborted. Mark it as such and wake the JoinHandle.
-            let stage = &mut *cell.stage.get();
-            if matches!(stage, Stage::Running) {
-                *stage = Stage::Aborted;
-                cell.complete.store(true, Ordering::Release);
-                if let Some(waker) = (*cell.waker.get()).take() {
-                    waker.wake();
-                }
-            }
+            let ptr = storage_ptr as *mut Payload<F, F::Output>;
+            std::ptr::write(ptr, Payload { future: ManuallyDrop::new(f) });
+        }
+        executor::commit_spawn(
+            id,
+            poll_inline::<F, F::Output> as PollFn,
+            Some(drop_inline_result::<F, F::Output> as DropResultFn),
+            Some(cancel_inline::<F, F::Output> as DropFutureFn),
+            Some(read_inline::<F, F::Output> as ReadFn),
+            None, // no dealloc needed for inline
+            plugin_id,
+        );
+    } else {
+        // Boxed: allocate on heap, store pointer in slot storage
+        let boxed = Box::new(Payload { future: ManuallyDrop::new(f) });
+        unsafe {
+            let ptr = storage_ptr as *mut *mut Payload<F, F::Output>;
+            std::ptr::write(ptr, Box::into_raw(boxed));
+        }
+        executor::commit_spawn(
+            id,
+            poll_boxed::<F, F::Output> as PollFn,
+            Some(drop_boxed_result::<F, F::Output> as DropResultFn),
+            Some(cancel_boxed::<F, F::Output> as DropFutureFn),
+            Some(read_boxed::<F, F::Output> as ReadFn),
+            Some(dealloc_boxed::<F, F::Output> as DeallocFn),
+            plugin_id,
+        );
+    }
 
-            // Decrement ref count when wrapper is dropped
-            if (self.vtable.dec_ref)(NonNull::new_unchecked(self.cell_ptr as *mut ())) {
-                (self.vtable.drop_cell)(NonNull::new_unchecked(self.cell_ptr as *mut ()));
+    JoinHandle {
+        id,
+        gen,
+        executor_idx,
+        taken: false,
+        _m: PhantomData,
+    }
+}
+
+// =============================================================================
+// JoinHandle
+// =============================================================================
+
+/// Handle to a spawned task. Implements Future to await the result.
+///
+/// - `Output = Option<T>`: `Some(result)` on success, `None` if cancelled.
+/// - Dropping without awaiting marks the task as detached (auto-cleanup).
+pub struct JoinHandle<T> {
+    id: u32,
+    gen: u32,
+    executor_idx: u16,
+    taken: bool,
+    _m: PhantomData<T>,
+}
+
+unsafe impl<T: Send> Send for JoinHandle<T> {}
+unsafe impl<T: Send> Sync for JoinHandle<T> {}
+impl<T> Unpin for JoinHandle<T> {}
+
+impl<T> JoinHandle<T> {
+    /// Get a packed task ID for FFI (host's wait_for_task).
+    pub fn task_id(&self) -> u64 {
+        executor::pack_task_id(self.gen, self.id)
+    }
+
+    /// Cancel the task. Drops the future if still running.
+    pub fn cancel(&mut self) {
+        if !self.taken {
+            executor::cancel_task(self.id, self.gen, self.executor_idx);
+            self.taken = true;
+        }
+    }
+
+    /// Abort the task (alias for cancel, matches tokio API).
+    pub fn abort(&self) {
+        executor::cancel_task(self.id, self.gen, self.executor_idx);
+    }
+
+    /// Check if the task is finished.
+    pub fn is_finished(&self) -> bool {
+        executor::is_task_finished(self.id, self.gen, self.executor_idx)
+    }
+}
+
+impl<T> Future for JoinHandle<T> {
+    type Output = Option<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        let this = self.get_mut();
+
+        // Get slot state via extern call
+        let (state, gen) = executor::slot_state(this.id, this.executor_idx);
+        
+        // Check generation mismatch (slot reused)
+        if gen != this.gen {
+            this.taken = true;
+            return Poll::Ready(None);
+        }
+
+        match state {
+            executor::STATE_COMPLETE => {
+                // Take result and free slot via extern call
+                let (result_ptr, dealloc_fn) = executor::take_result(this.id, this.executor_idx);
+                let result = unsafe { std::ptr::read(result_ptr as *mut T) };
+                // Dealloc storage (for boxed) without dropping T (already moved)
+                if let Some(dealloc) = dealloc_fn {
+                    unsafe { dealloc(result_ptr) };
+                }
+                this.taken = true;
+                Poll::Ready(Some(result))
             }
+            executor::STATE_CANCELLED | executor::STATE_EMPTY => {
+                this.taken = true;
+                Poll::Ready(None)
+            }
+            _ => {
+                // Task still running — store waker for notification
+                executor::set_join_waker(this.id, this.executor_idx, cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<T> Drop for JoinHandle<T> {
+    fn drop(&mut self) {
+        if !self.taken {
+            executor::detach_or_cleanup(self.id, self.gen, self.executor_idx);
         }
     }
 }
@@ -352,78 +272,57 @@ impl<F: Future> Drop for WrapperFuture<F> {
 // block_on
 // =============================================================================
 
-/// Block the current thread until a future completes, driving the runtime.
-pub fn block_on<F: Future + 'static>(future: F) -> F::Output
-where
-    F::Output: 'static,
-{
-    // Create ref-counted task cell
-    let cell_ptr = TaskCell::<F::Output>::new();
-    
-    let raw = RawTask {
-        ptr: unsafe { NonNull::new_unchecked(cell_ptr as *mut ()) },
-        vtable: make_vtable::<F::Output>(),
-    };
-    
-    // Create wrapper
-    let wrapper = WrapperFuture {
-        future,
-        cell_ptr,
-        vtable: raw.vtable,
-    };
+/// Block the current thread until a future completes, driving the executor.
+pub fn block_on<F: Future>(f: F) -> F::Output {
+    use std::task::{RawWaker, RawWakerVTable};
 
-    // Transmute to add Send bound (safe for single-threaded runtime)
-    let boxed: Pin<Box<dyn Future<Output = ()> + Send>> = unsafe {
-        let boxed: Pin<Box<dyn Future<Output = ()>>> = Box::pin(wrapper);
-        std::mem::transmute(boxed)
-    };
-    let future_ptr = Box::into_raw(Box::new(boxed)) as *mut ();
+    fn noop_clone(d: *const ()) -> RawWaker { RawWaker::new(d, &NOOP_VTABLE) }
+    fn noop(_: *const ()) {}
+    static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
 
-    unsafe extern "C" fn poll_erased(future_ptr: *mut (), waker: FfiWaker) -> FfiPoll {
-        let future = &mut *(future_ptr as *mut Pin<Box<dyn Future<Output = ()> + Send>>);
-        let waker = ffi_waker_to_std(waker);
-        let mut cx = Context::from_waker(&waker);
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(()) => FfiPoll::Ready,
-            Poll::Pending => FfiPoll::Pending,
-        }
-    }
+    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &NOOP_VTABLE)) };
+    let mut cx = Context::from_waker(&waker);
+    let mut pinned = std::pin::pin!(f);
 
-    unsafe extern "C" fn drop_erased(future_ptr: *mut ()) {
-        drop(Box::from_raw(
-            future_ptr as *mut Pin<Box<dyn Future<Output = ()> + Send>>,
-        ));
-    }
-
-    let _task_id = unsafe { tau_spawn(future_ptr, poll_erased, drop_erased) };
-    
-    // Drive until complete
     loop {
-        if unsafe { (raw.vtable.is_complete)(raw.ptr) } {
-            break;
+        // Poll root future
+        if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
+            return v;
         }
-        unsafe { tau_drive() };
-        std::thread::sleep(Duration::from_micros(100));
-    }
-    
-    // Read result
-    let mut result: Poll<Option<F::Output>> = Poll::Pending;
-    unsafe {
-        (raw.vtable.try_read_output)(raw.ptr, &mut result as *mut _ as *mut ());
-    }
-    
-    // Decrement our ref count
-    unsafe {
-        if (raw.vtable.dec_ref)(raw.ptr) {
-            (raw.vtable.drop_cell)(raw.ptr);
+
+        // Drive executor until quiescent
+        let mut drove = false;
+        while executor::drive_cycle() {
+            drove = true;
         }
+
+        if drove {
+            // Work was done — re-poll root future immediately
+            continue;
+        }
+
+        // No work — block on IO reactor with timeout
+        let timeout = executor::next_timer_deadline()
+            .map(|d| d.min(Duration::from_millis(10)))
+            .unwrap_or(Duration::from_millis(10));
+        unsafe { tau_react(timeout.as_millis() as u64) };
     }
-    
-    match result {
-        Poll::Ready(Some(val)) => val,
-        Poll::Ready(None) => panic!("block_on: task was aborted"),
-        Poll::Pending => panic!("block_on: task did not complete"),
+}
+
+/// Drive the executor for one cycle. Returns number of tasks that completed.
+/// (Backward-compatible with the old tau_drive API.)
+pub fn drive() -> u32 {
+    let mut completed = 0u32;
+    while executor::drive_cycle() {
+        completed += 1;
     }
+    completed
+}
+
+/// Initialize the runtime. Call once on the main thread.
+pub fn init() -> Result<(), i32> {
+    executor::init();
+    Ok(())
 }
 
 // =============================================================================
@@ -437,14 +336,14 @@ pub async fn sleep(duration: Duration) {
 
 /// Future that completes after a duration.
 pub struct SleepFuture {
-    nanos: u64,
-    handle: u64,
+    deadline: std::time::Instant,
+    handle: u64, // 0 = not registered
 }
 
 impl SleepFuture {
     pub fn new(duration: Duration) -> Self {
         Self {
-            nanos: duration.as_nanos() as u64,
+            deadline: std::time::Instant::now() + duration,
             handle: 0,
         }
     }
@@ -453,32 +352,24 @@ impl SleepFuture {
 impl Future for SleepFuture {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        if self.handle == 0 {
-            self.handle = unsafe { tau_timer_create(self.nanos) };
-            return Poll::Pending;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if std::time::Instant::now() >= self.deadline {
+            return Poll::Ready(());
         }
-        if unsafe { tau_timer_check(self.handle) } == 1 {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
+        // Register or update timer waker
+        self.handle = executor::timer_register(
+            self.deadline,
+            cx.waker().clone(),
+            self.handle,
+        );
+        Poll::Pending
     }
 }
 
 impl Drop for SleepFuture {
     fn drop(&mut self) {
         if self.handle != 0 {
-            unsafe { tau_timer_cancel(self.handle) };
+            executor::timer_cancel(self.handle);
         }
     }
-}
-
-// =============================================================================
-// FfiWaker conversion
-// =============================================================================
-
-fn ffi_waker_to_std(ffi: FfiWaker) -> Waker {
-    // Delegate to FfiWaker::into_waker which handles clone_fn/drop_fn correctly
-    ffi.into_waker()
 }

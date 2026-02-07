@@ -185,6 +185,7 @@ impl Compiler {
             source_dir, profile
         );
 
+        println!("[Compiler] Running build command: {:?}", cmd);
         // Execute build
         let output = cmd
             .output()

@@ -11,7 +11,7 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::task::Waker;
 use std::time::Duration;
 
-use crate::runtime::executor::debug_enabled;
+use super::executor::debug_enabled;
 
 // =============================================================================
 // Interest and Direction flags (match tokio conventions)
@@ -243,17 +243,4 @@ where
     let reactor = REACTOR.get().expect("reactor not initialized");
     let mut guard = reactor.lock().unwrap();
     f(&mut guard)
-}
-
-/// Try to notify the reactor to wake from blocking poll.
-/// Uses try_lock to avoid deadlock if called from within reactor.poll().
-/// If we can't get the lock, the reactor is already awake and will see the wake.
-pub fn try_notify_reactor() {
-    if let Some(reactor) = REACTOR.get() {
-        if let Ok(guard) = reactor.try_lock() {
-            let _ = guard.poller.notify();
-        }
-        // If try_lock fails, reactor is busy (probably polling) and will 
-        // see the woken task when it checks the wake queue
-    }
 }
