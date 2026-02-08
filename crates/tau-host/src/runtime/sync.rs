@@ -48,6 +48,7 @@ mod queue {
             self.0.pop()
         }
         
+        #[allow(dead_code)]
         pub fn is_empty(&self) -> bool {
             self.0.is_empty()
         }
@@ -87,21 +88,25 @@ pub use queue::RemoteQueue;
 // =============================================================================
 
 #[cfg(loom)]
+#[allow(dead_code)]
 pub(crate) fn park() {
     loom::thread::yield_now();
 }
 
 #[cfg(not(loom))]
+#[allow(dead_code)]
 pub(crate) fn park() {
     std::thread::park();
 }
 
 #[cfg(loom)]
+#[allow(dead_code)]
 pub(crate) fn unpark(thread: &loom::thread::Thread) {
     thread.unpark();
 }
 
 #[cfg(not(loom))]
+#[allow(dead_code)]
 pub(crate) fn unpark(thread: &std::thread::Thread) {
     thread.unpark();
 }
